@@ -1,0 +1,116 @@
+# Builds the Easy Buys Android app (.apk) on GitHub's free servers.
+# Upload app.zip to the top of the repository; every upload starts a build (about 20 minutes).
+# When it shows a green tick: Releases › "Latest app – Easy Buys" › tap the .apk on the tablet or phone.
+# It installs over the Bakery app and keeps all its data (same app id and signature).
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Unpack the app
+        working-directory: .
+        run: |
+          ZIP=$(ls EasyBuys.zip app.zip BakeryManager.zip 2>/dev/null | head -1)
+          test -n "$ZIP" || { echo "Upload EasyBuys.zip to the top of the repository"; exit 1; }
+          echo "Building from $ZIP"
+          rm -rf app /tmp/unz && unzip -q -o "$ZIP" -d /tmp/unz
+          if [ -f /tmp/unz/package.json ]; then mv /tmp/unz app; else mv "$(dirname "$(ls /tmp/unz/*/package.json | head -1)")" app; fi
+          test -f app/package.json || { echo "The zip has no package.json"; exit 1; }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install app libraries
+        run: |
+          npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+          npx expo install --fix || true
+          # The face engine and its model files come from this package – make sure it is really there.
+          if [ ! -s node_modules/@vladmandic/face-api/model/face_recognition_model.bin ]; then
+            echo "Face engine package missing – installing it again"
+            npm install --no-audit --no-fund --no-save @vladmandic/face-api@1.7.15 || npm install --no-audit --no-fund --no-save --legacy-peer-deps @vladmandic/face-api@1.7.15
+          fi
+          ls -la node_modules/@vladmandic/face-api/model/ | head -20 || true
+
+      - name: Run the checks (upgrade from Bakery, Time Clock, timesheets, leave, sync, device linking, cloud)
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
+            npm test
+          else
+            echo "No npm test script found in package.json; skipping automated tests."
+          fi
+
+      - name: Check the face engine in Chrome (information only)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if [ ! -f "./plugins/withFaceAssets.js" ] && [ ! -f "./plugins/withFaceAssets.cjs" ] && [ ! -f "./plugins/withFaceAssets.mjs" ]; then
+            echo "Face engine plugin not present in this app package; skipping Chrome face-engine check."
+            exit 0
+          fi
+          node -e "require('./plugins/withFaceAssets').copyFaceFiles(process.cwd(), '/tmp/fe')"
+          google-chrome --headless=new --no-sandbox --allow-file-access-from-files --virtual-time-budget=120000 --dump-dom "file:///tmp/fe/app/src/main/assets/face/index.html?selftest" > /tmp/dom.txt 2>/dev/null || true
+          grep -o '<pre class="msg">[^<]*' /tmp/dom.txt || echo "No answer from the face engine"
+          grep -q '"reason":"no_face"' /tmp/dom.txt && echo "FACE ENGINE OK" || echo "Face engine self-test did not return no_face; continuing."
+
+      - name: Check the app code
+        run: npx expo export --platform android --output-dir /tmp/check 2>&1 | tail -40; exit ${PIPESTATUS[0]}
+
+      - name: Build the apk
+        run: |
+          CI=1 npx expo prebuild --platform android --clean --no-install
+          # Make sure the face engine is inside the app (copy it again if the build step missed it).
+          if [ ! -s android/app/src/main/assets/face/model/face_recognition_model.bin ]; then
+            echo "Face engine not packed by prebuild – copying it now"
+            node -e "require('./plugins/withFaceAssets').copyFaceFiles(process.cwd(), 'android')" || true
+          fi
+          if [ -s android/app/src/main/assets/face/model/face_recognition_model.bin ]; then
+            echo "Face engine model found."
+            echo "FACE=ok" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Face engine files are NOT in this app – the face check will not work on this build."
+            echo "FACE=missing" >> "$GITHUB_ENV"
+          fi
+          ls -la android/app/src/main/assets/face android/app/src/main/assets/face/model || true
+          cd android && chmod +x gradlew && ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=armeabi-v7a,arm64-v8a,x86_64
+
+      - name: Publish the apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          NAME="EasyBuys-v${VERSION}-build${{ github.run_number }}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "../$NAME"
+          cd ..
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest "$NAME" --title "Latest app – Easy Buys v${VERSION} (build ${{ github.run_number }})" --notes "Open this page on the tablet or phone and tap the .apk to install. It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
+
+      - name: Keep a copy for 30 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: easy-buys-apk
+          path: EasyBuys-*.apk
+          retention-days: 30
