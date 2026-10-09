@@ -148,11 +148,86 @@ function doPost(e) {
         return json_({ ok: true, text: texts.join('\n') });
       }
 
+      case 'file_put': {
+        // Documents kept by the app (licences, applications, contracts…): Easy Buys › Documents › <section>.
+        const sect = String(body.folder || 'other').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 40) || 'other';
+        const name = String(body.fileName || 'document').replace(/[\\/]/g, '-').slice(0, 120);
+        const f = saveFile_(path_(['Documents', sect]), name, body.data, String(body.mime || 'application/octet-stream'));
+        return json_({ ok: true, id: f.getId(), url: f.getUrl() });
+      }
+
+      case 'file_get': {
+        // Only files kept under Easy Buys › Documents can be fetched.
+        const file = DriveApp.getFileById(String(body.id || ''));
+        const docs = path_(['Documents']).getId();
+        let ok = false;
+        const parents = file.getParents();
+        while (parents.hasNext() && !ok) { const p = parents.next(); const up = p.getParents(); if (p.getId() === docs || (up.hasNext() && up.next().getId() === docs)) ok = true; }
+        if (!ok) return json_({ ok: false, error: 'Not an Easy Buys document.' });
+        return json_({ ok: true, data: Utilities.base64Encode(file.getBlob().getBytes()), mime: file.getMimeType(), name: file.getName() });
+      }
+
       case 'backup': {
         const folder = path_(['Backups']);
         saveFile_(folder, body.fileName, Utilities.base64Encode(body.data, Utilities.Charset.UTF_8), 'application/json');
         return json_({ ok: true });
       }
+
+      case 'viber_setup': {
+        // Viber Channel "Post API": the token comes from the channel's Settings › Developer tools. Kept only here.
+        const token = String(body.token || '').trim();
+        const current = PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN');
+        // Replacing or removing a token needs the current one (so a lost tablet cannot take the alerts over).
+        if (current && String(body.oldToken || '').trim() !== current) return json_({ ok: false, error: 'A Viber Channel is already connected. Enter its current token to replace or remove it.' });
+        if (!token) { PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN'); return json_({ ok: true, message: 'Viber Channel disconnected.' }); }
+        PropertiesService.getScriptProperties().setProperty('VIBER_TOKEN', token);
+        PropertiesService.getScriptProperties().deleteProperty('VIBER_FROM');
+        const t = viber_('Easy Buys alerts are connected to this channel.');
+        if (!t.ok) PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN');
+        return json_(t.ok ? { ok: true, message: 'Connected – a test message was sent to the channel.' } : t);
+      }
+
+      case 'email': {
+        // Emails to staff (welcome, signed contract). Sent from the Google account the cloud runs on.
+        const to = cleanEmails_([body.to]);
+        if (!to.length) return json_({ ok: false, error: 'No valid email address.' });
+        // Only to people being onboarded (their email is in the synced onboarding records) – a device cannot email anyone else.
+        if (!staffEmail_(to[0])) return json_({ ok: false, error: 'This address is not a staff member being onboarded.' });
+        const atts = (body.attachments || []).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'document.pdf'); });
+        MailApp.sendEmail({ to: to.join(','), subject: String(body.subject || 'Easy Buys'), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
+        return json_({ ok: true });
+      }
+
+      case 'calendar': {
+        // The roster week: one Google Calendar per shop ("Easy Buys Roster – S1"). The week is replaced each time it is sent.
+        const tz = Session.getScriptTimeZone();
+        const byShop = {};
+        (body.shifts || []).forEach(function (x) { (byShop[x.shop] = byShop[x.shop] || []).push(x); });
+        const from = new Date(body.weekStart + 'T00:00:00');
+        const to = new Date(body.weekEnd + 'T23:59:59');
+        let n = 0;
+        // Clear this week in every roster calendar first (also shops with no shifts now).
+        CalendarApp.getAllOwnedCalendars().filter(function (c) { return c.getName().indexOf('Easy Buys Roster – ') === 0; }).forEach(function (c) {
+          c.getEvents(from, to).forEach(function (ev) { if (ev.getTag('eb') === '1' && ev.getStartTime() >= from) ev.deleteEvent(); });
+        });
+        Object.keys(byShop).forEach(function (shop) {
+          const name = 'Easy Buys Roster – ' + shop;
+          const cal = CalendarApp.getCalendarsByName(name)[0] || CalendarApp.createCalendar(name, { timeZone: tz });
+          byShop[shop].forEach(function (x) {
+            const st = new Date(x.date + 'T' + x.start + ':00');
+            let en = new Date(x.date + 'T' + x.end + ':00');
+            if (en <= st) en = new Date(en.getTime() + 86400000);
+            const ev = cal.createEvent(x.name + (x.note ? ' – ' + x.note : ''), st, en);
+            ev.setTag('eb', '1');
+            n += 1;
+          });
+        });
+        return json_({ ok: true, events: n });
+      }
+
+      case 'viber':
+        return json_(viber_(String(body.text || '').slice(0, 7000)));
 
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
@@ -160,6 +235,37 @@ function doPost(e) {
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message ? err.message : err) });
   }
+}
+
+function staffEmail_(addr) {
+  const a = String(addr).trim().toLowerCase();
+  const sh = data_().getSheetByName('T_onboarding');
+  if (!sh) return false;
+  return values_(sh).some(function (r) { try { return String(JSON.parse(r[4] || '{}').email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
+}
+
+// Send a text to the Viber Channel (Channels Post API). The sender must be the channel's super admin.
+function viber_(text) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('VIBER_TOKEN');
+  if (!token) return { ok: true, off: true };
+  const call = function (path, payload) {
+    const r = UrlFetchApp.fetch('https://chatapi.viber.com/pa/' + path, { method: 'post', contentType: 'application/json', headers: { 'X-Viber-Auth-Token': token },
+      payload: JSON.stringify(payload || {}), muteHttpExceptions: true });
+    try { return JSON.parse(r.getContentText()); } catch (e) { return { status: -1, status_message: r.getContentText().slice(0, 200) }; }
+  };
+  let from = props.getProperty('VIBER_FROM');
+  if (!from) {
+    const info = call('get_account_info', {});
+    if (info.status !== 0) return { ok: false, error: 'Viber: ' + (info.status_message || 'token not accepted') };
+    const admin = (info.members || []).filter(function (m) { return m.role === 'superadmin'; })[0] || (info.members || [])[0];
+    if (!admin) return { ok: false, error: 'Viber: the channel has no admin member.' };
+    from = admin.id;
+    props.setProperty('VIBER_FROM', from);
+  }
+  const r = call('post', { from: from, type: 'text', text: text });
+  if (r.status !== 0) { props.deleteProperty('VIBER_FROM'); return { ok: false, error: 'Viber: ' + (r.status_message || 'not sent') }; }
+  return { ok: true };
 }
 
 function ocr_(blob) {
