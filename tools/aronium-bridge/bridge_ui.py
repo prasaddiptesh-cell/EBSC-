@@ -84,7 +84,7 @@ class BridgeUI(tk.Tk):
         win.title("Configure this Aronium till")
         win.transient(self)
         win.grab_set()
-        win.geometry("650x390")
+        win.geometry("780x570")
         form = ttk.Frame(win, padding=16)
         form.pack(fill="both", expand=True)
         fields = [
@@ -123,7 +123,7 @@ class BridgeUI(tk.Tk):
                 messagebox.showerror("Save failed", str(exc), parent=win)
                 return
             win.destroy()
-            self.append_log("Saved local configuration. Cloud upload remains disabled.")
+            self.append_log("Saved local configuration. Cloud upload setting: " + ("ON" if cfg.get("cloud_sync_enabled") else "OFF") + ".")
             self.refresh_status()
         ttk.Button(form, text="Save configuration", command=save).grid(row=len(fields)+1, column=2, sticky="e")
 
