@@ -127,6 +127,16 @@ def queue_connection(path: Path) -> sqlite3.Connection:
     conn.commit()
     return conn
 
+def profile_schema(_: argparse.Namespace) -> int:
+    from schema_profile import main as run_profile
+    run_profile()
+    return 0
+
+def extract_mapped(_: argparse.Namespace) -> int:
+    from extract_mapped import main as run_extractor
+    run_extractor()
+    return 0
+
 def init_queue(_: argparse.Namespace) -> int:
     cfg = load_config()
     path = path_of(cfg["queue_path"])
@@ -314,6 +324,8 @@ def main() -> int:
     for name, help_text, handler in [
         ("validate", "Validate configuration and read-only database access", validate),
         ("inspect-schema", "Write schema-only report without transaction rows", inspect_schema),
+        ("profile-schema", "Write schema profile with table counts and candidate roles", profile_schema),
+        ("extract-mapped", "Queue records using explicitly enabled mappings", extract_mapped),
         ("init-queue", "Initialize local durable queue", init_queue),
         ("status", "Show bridge configuration and queue status", status),
         ("enqueue-json", "Queue pre-mapped events from a local JSON file", enqueue_json),
