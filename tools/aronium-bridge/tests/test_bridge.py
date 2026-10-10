@@ -1,6 +1,7 @@
 import importlib.util
 import sqlite3
 import tempfile
+from contextlib import closing
 import unittest
 from pathlib import Path
 
@@ -17,7 +18,7 @@ class BridgeFoundationTests(unittest.TestCase):
             conn.execute("CREATE TABLE sample(id INTEGER PRIMARY KEY)")
             conn.commit()
             conn.close()
-            with bridge.connect_source(db) as source:
+            with closing(bridge.connect_source(db)) as source:
                 self.assertEqual(source.execute("SELECT COUNT(*) FROM sample").fetchone()[0], 0)
                 with self.assertRaises(sqlite3.OperationalError):
                     source.execute("CREATE TABLE must_not_exist(id INTEGER)")
@@ -28,7 +29,7 @@ class BridgeFoundationTests(unittest.TestCase):
     def test_queue_has_unique_idempotency_key(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "queue.db"
-            with bridge.queue_connection(path) as conn:
+            with closing(bridge.queue_connection(path)) as conn:
                 conn.execute(
                     "INSERT INTO sync_queue(source_id,entity_type,source_record_id,idempotency_key,payload_json,created_at_utc,updated_at_utc) "
                     "VALUES(?,?,?,?,?,?,?)",
@@ -43,7 +44,7 @@ class BridgeFoundationTests(unittest.TestCase):
 
     def test_queue_initializes_empty(self):
         with tempfile.TemporaryDirectory() as temp:
-            with bridge.queue_connection(Path(temp) / "queue.db") as conn:
+            with closing(bridge.queue_connection(Path(temp) / "queue.db")) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0], 0)
 
 if __name__ == "__main__":
