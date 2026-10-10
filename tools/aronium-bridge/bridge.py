@@ -291,6 +291,22 @@ def sync_queue(args: argparse.Namespace) -> int:
     return 0 if review == 0 else 1
 
 
+def watch_queue(args: argparse.Namespace) -> int:
+    """Continuously attempt to upload queued mapped events until stopped."""
+    import time
+    interval = max(5, min(300, int(args.interval)))
+    print(f"Queue sync loop started (every {interval}s). Press Ctrl+C to stop.")
+    try:
+        while True:
+            result = sync_queue(argparse.Namespace(limit=args.limit))
+            if result not in (0, 2):
+                print("Some events remain queued or need review; the loop will retry pending events.")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\\nQueue sync loop stopped. Local queue is preserved.")
+        return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Easy Buys Aronium bridge foundation")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -301,11 +317,12 @@ def main() -> int:
         ("status", "Show bridge configuration and queue status", status),
         ("enqueue-json", "Queue pre-mapped events from a local JSON file", enqueue_json),
         ("sync-queue", "Upload pending events to configured Easy Buys POS API", sync_queue),
+        ("watch-queue", "Continuously retry pending queue uploads", watch_queue),
     ]:
         p = sub.add_parser(name, help=help_text)
         p.set_defaults(handler=handler)
         if name == "enqueue-json": p.add_argument("file", help="Path to a JSON file containing an events array")
-        if name == "sync-queue": p.add_argument("--limit", type=int, default=50, help="Maximum events per upload batch (1-100)")
+        if name in ("sync-queue", "watch-queue"): p.add_argument("--limit", type=int, default=50, help="Maximum events per upload batch (1-100)")\n        if name == "watch-queue": p.add_argument("--interval", type=int, default=10, help="Seconds between retries (5-300)")
     args = parser.parse_args()
     try:
         return int(args.handler(args))
