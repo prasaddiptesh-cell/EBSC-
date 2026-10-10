@@ -29,17 +29,22 @@ class BridgeUI(tk.Tk):
         self.install_label.pack(anchor="w")
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=(0, 12))
-        for label, command in [
+        action_items = [
             ("Configure", self.open_config_dialog),
             ("Validate database", lambda: self.run_command("validate")),
             ("Inspect schema", lambda: self.run_command("inspect-schema")),
+            ("Profile schema", lambda: self.run_command("profile-schema")),
             ("Initialize queue", lambda: self.run_command("init-queue")),
+            ("Extract mapped data", lambda: self.run_command("extract-mapped")),
             ("Sync pending queue", lambda: self.run_command("sync-queue")),
-            ("Refresh status", lambda: self.refresh_status),
-        ]:
-            if label == "Refresh status":
-                command = self.refresh_status
-            ttk.Button(actions, text=label, command=command).pack(side="left", padx=(0, 7))
+            ("Refresh status", self.refresh_status),
+        ]
+        for index, (label, command) in enumerate(action_items):
+            ttk.Button(actions, text=label, command=command).grid(
+                row=index // 4, column=index % 4, sticky="ew", padx=4, pady=4
+            )
+        for column in range(4):
+            actions.columnconfigure(column, weight=1)
         ttk.Label(self, text="Activity log", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         self.log = tk.Text(self, height=18, wrap="word", state="disabled", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True, pady=(5, 0))
