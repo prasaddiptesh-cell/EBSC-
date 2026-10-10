@@ -5,7 +5,7 @@ Foundation for three independent Aronium installations:
 - Shop 2, V M Pillay Road: S2-TILL1
 
 ## Status
-This is a safe foundation, not yet connected to the Easy Buys cloud API. Cloud upload is not implemented. The bridge does not modify Aronium or export transaction row data.
+The dedicated cloud ingestion/query API and a queue upload client are now present on this development branch, but they have not yet been deployed to your Google Apps Script project or tested against real POS data. The bridge does not modify Aronium. Automatic extraction of actual sales still depends on verified schema mapping.
 
 ## Included
 - Python 3.11+ foundation with standard library only
