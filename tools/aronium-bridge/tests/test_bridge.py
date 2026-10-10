@@ -22,7 +22,7 @@ class BridgeFoundationTests(unittest.TestCase):
                 self.assertEqual(source.execute("SELECT COUNT(*) FROM sample").fetchone()[0], 0)
                 with self.assertRaises(sqlite3.OperationalError):
                     source.execute("CREATE TABLE must_not_exist(id INTEGER)")
-            with sqlite3.connect(db) as verify:
+            with closing(sqlite3.connect(db)) as verify:
                 names = [r[0] for r in verify.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             self.assertEqual(names, ["sample"])
 
