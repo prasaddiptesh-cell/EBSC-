@@ -70,6 +70,8 @@ function doPost(e) {
     const body = JSON.parse(e.postData.contents);
     // --- the main Easy Buys software (office PC) ---
     if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices') return json_(mainApi_(body));
+    // --- Aronium bridge: dedicated authenticated POS ingestion/query API ---
+    if (body.kind === 'pos_ingest' || body.kind === 'pos_query' || body.kind === 'pos_status') return json_(posBridgeApi_(body));
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
     const who = auth_(body);
@@ -690,3 +692,139 @@ function setup() {
 // Optional: new devices must be approved by the owner before they sync. Run once to turn on/off.
 function requireApprovalOn() { PropertiesService.getScriptProperties().setProperty('REQUIRE_APPROVAL', '1'); }
 function requireApprovalOff() { PropertiesService.getScriptProperties().setProperty('REQUIRE_APPROVAL', '0'); }
+
+
+// ================================================================ Aronium POS bridge API
+// Configure POS_BRIDGE_TOKEN in Script Properties before deploying this API.
+// Never place the token in source code or in the Git repository.
+const POS_EVENT_HEADER = ['event_id','source_id','shop_id','entity_type','source_record_id','event_time','payload_hash','payload_json','received_at'];
+const POS_ALLOWED_TYPES = ['sale','sale_line','payment','refund','void','product','stock_movement','customer','cashier','eod_summary'];
+
+function posSheet_() {
+  return sheet_('POS_Events', POS_EVENT_HEADER);
+}
+function posBridgeApi_(body) {
+  const props = PropertiesService.getScriptProperties();
+  const expected = props.getProperty('POS_BRIDGE_TOKEN');
+  if (!expected || !body.bridge_token || String(body.bridge_token) !== expected) {
+    return { ok: false, error: 'POS bridge authentication failed.' };
+  }
+  if (body.kind === 'pos_ingest') return posIngest_(body);
+  if (body.kind === 'pos_query') return posQuery_(body);
+  if (body.kind === 'pos_status') {
+    const sh = posSheet_();
+    return { ok: true, service: 'easy-buys-pos-bridge', version: 1,
+      accepted_events: Math.max(0, sh.getLastRow() - 1), server_time: now_() };
+  }
+  return { ok: false, error: 'Unsupported POS bridge request.' };
+}
+
+// Each event is idempotent by source_id + event_id. Replays with identical payload
+// are acknowledged without another row; same identity with changed payload is rejected.
+function posIngest_(body) {
+  const incoming = Array.isArray(body.events) ? body.events : [];
+  if (!incoming.length) return { ok: true, accepted: 0, duplicate: 0, rejected: [], results: [] };
+  if (incoming.length > 100) return { ok: false, error: 'Maximum 100 events per batch.' };
+  return withLock_(function () {
+    const sh = posSheet_();
+    const last = sh.getLastRow();
+    const existing = {};
+    if (last > 1) {
+      sh.getRange(2, 1, last - 1, 9).getValues().forEach(function (r) {
+        existing[String(r[1]) + '|' + String(r[0])] = { hash: String(r[6]), row: Number(r[0]) };
+      });
+    }
+    const acceptedRows = [];
+    const results = [];
+    const rejected = [];
+    let duplicate = 0;
+    const now = now_();
+    incoming.forEach(function (ev, index) {
+      if (!ev || typeof ev !== 'object') {
+        rejected.push({ index: index, error: 'Event must be an object.' }); return;
+      }
+      const eventId = String(ev.event_id || '').trim();
+      const sourceId = String(ev.source_id || '').trim();
+      const shopId = String(ev.shop_id || '').trim();
+      const type = String(ev.entity_type || '').trim();
+      const sourceRecordId = String(ev.source_record_id || '').trim();
+      if (!eventId || !sourceId || !shopId || !sourceRecordId || POS_ALLOWED_TYPES.indexOf(type) < 0) {
+        rejected.push({ index: index, error: 'Missing required event identity or unsupported entity_type.' }); return;
+      }
+      if (eventId.length > 240 || sourceId.length > 80 || shopId.length > 40 || sourceRecordId.length > 240) {
+        rejected.push({ index: index, error: 'Identity field exceeds allowed length.' }); return;
+      }
+      const payload = ev.payload === undefined ? {} : ev.payload;
+      const payloadJson = JSON.stringify(payload);
+      if (payloadJson.length > 45000) {
+        rejected.push({ index: index, event_id: eventId, error: 'Event payload too large.' }); return;
+      }
+      const hash = sha_(type + '|' + sourceRecordId + '|' + payloadJson + '|' + String(ev.event_time || ''));
+      const key = sourceId + '|' + eventId;
+      if (existing[key]) {
+        if (existing[key].hash === hash) {
+          duplicate += 1;
+          results.push({ event_id: eventId, status: 'already_processed' });
+        } else {
+          rejected.push({ index: index, event_id: eventId, error: 'Idempotency conflict: event identity already exists with different payload.' });
+        }
+        return;
+      }
+      const row = [eventId, sourceId, shopId, type, sourceRecordId,
+        String(ev.event_time || ''), hash, payloadJson, now];
+      acceptedRows.push(row);
+      existing[key] = { hash: hash, row: last + acceptedRows.length };
+      results.push({ event_id: eventId, status: 'accepted' });
+    });
+    if (acceptedRows.length) {
+      sh.getRange(sh.getLastRow() + 1, 1, acceptedRows.length, POS_EVENT_HEADER.length).setValues(acceptedRows);
+    }
+    return { ok: true, accepted: acceptedRows.length, duplicate: duplicate,
+      rejected: rejected, results: results, server_time: now };
+  });
+}
+
+// Read-only query API. Always filter by source/shop/date; result cap avoids giant responses.
+// This API returns raw mapped event payloads; user-facing reports are built in the app.
+function posQuery_(body) {
+  const limit = Math.max(1, Math.min(500, Number(body.limit) || 100));
+  const sourceId = String(body.source_id || '');
+  const shopId = String(body.shop_id || '');
+  const type = String(body.entity_type || '');
+  const from = String(body.from || '');
+  const to = String(body.to || '');
+  const sh = posSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return { ok: true, events: [], count: 0, has_more: false };
+  const rows = sh.getRange(2, 1, last - 1, POS_EVENT_HEADER.length).getValues();
+  const events = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (sourceId && String(r[1]) !== sourceId) continue;
+    if (shopId && String(r[2]) !== shopId) continue;
+    if (type && String(r[3]) !== type) continue;
+    const eventTime = String(r[5] || '');
+    if (from && eventTime < from) continue;
+    if (to && eventTime > to) continue;
+    let payload = {};
+    try { payload = JSON.parse(String(r[7] || '{}')); } catch (e) { payload = {}; }
+    events.push({ event_id: String(r[0]), source_id: String(r[1]), shop_id: String(r[2]),
+      entity_type: String(r[3]), source_record_id: String(r[4]), event_time: eventTime,
+      payload: payload, received_at: String(r[8]) });
+    if (events.length > limit) break;
+  }
+  const hasMore = events.length > limit;
+  if (hasMore) events.pop();
+  return { ok: true, events: events, count: events.length, has_more: hasMore };
+}
+
+// Run manually from Apps Script after reviewing the deployment. Generates a token once
+// and logs it to the private execution log. Store it securely in the Windows bridge config;
+// never commit it. If a token already exists, this function does not rotate it.
+function setupPosBridgeToken() {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('POS_BRIDGE_TOKEN')) {
+    props.setProperty('POS_BRIDGE_TOKEN', Utilities.getUuid() + Utilities.getUuid());
+  }
+  Logger.log('POS_BRIDGE_TOKEN (copy to a secure Windows environment variable; never commit or share it): ' + props.getProperty('POS_BRIDGE_TOKEN'));
+}

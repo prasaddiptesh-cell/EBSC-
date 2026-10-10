@@ -1,0 +1,68 @@
+name: Easy Buys Bridge Windows Build
+
+on:
+  push:
+    branches:
+      - feature/aronium-sync-bridge-foundation
+    paths:
+      - "tools/aronium-bridge/**"
+      - ".github/workflows/aronium-bridge-windows-build.yml"
+  pull_request:
+    paths:
+      - "tools/aronium-bridge/**"
+      - ".github/workflows/aronium-bridge-windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tools/aronium-bridge
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+      - name: Install packaging tool
+        run: python -m pip install --upgrade pip pyinstaller
+      - name: Compile source
+        run: python -m py_compile bridge.py bridge_ui.py app.py schema_profile.py extract_mapped.py
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Build Windows executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumBridge app.py
+      - name: Assemble portable test package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\EasyBuysAroniumBridge-Test | Out-Null
+          Copy-Item dist\EasyBuysAroniumBridge.exe dist\EasyBuysAroniumBridge-Test\
+          Copy-Item config.example.json dist\EasyBuysAroniumBridge-Test\
+          Copy-Item mapping.example.json dist\EasyBuysAroniumBridge-Test\
+          Copy-Item README.md dist\EasyBuysAroniumBridge-Test\
+          Copy-Item SETUP-TEST-LAPTOP.md dist\EasyBuysAroniumBridge-Test\
+          @"
+          EASY BUYS ARONIUM BRIDGE - TEST BUILD
+          
+          This is an early test build, not a production release.
+          Cloud upload is disabled in the UI. Use a test Aronium database only.
+          Do not use for financial posting or stock adjustments.
+          
+          First run: launch EasyBuysAroniumBridge.exe, choose Configure,
+          set a TEST shop/till identity, and select a copied test database.
+          Keep the original Aronium database untouched.
+          "@ | Set-Content dist\EasyBuysAroniumBridge-Test\TEST-BUILD-NOTICE.txt
+          Compress-Archive -Path dist\EasyBuysAroniumBridge-Test\* -DestinationPath dist\EasyBuysAroniumBridge-Test.zip -Force
+      - name: Upload portable Windows test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: EasyBuysAroniumBridge-Windows-Test
+          path: tools/aronium-bridge/dist/EasyBuysAroniumBridge-Test.zip
+          if-no-files-found: error
+          retention-days: 14

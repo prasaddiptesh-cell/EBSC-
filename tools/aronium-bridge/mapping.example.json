@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "description": "Fill table and column names after running inspect-schema. Extraction remains disabled unless enabled=true.",
+  "entities": {
+    "sale": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "columns": {
+        "receipt_number": "",
+        "status": "",
+        "cashier_id": "",
+        "subtotal": "",
+        "discount_total": "",
+        "tax_total": "",
+        "grand_total": "",
+        "currency": ""
+      }
+    },
+    "sale_line": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "parent_sale_key_column": "",
+      "columns": {
+        "product_id": "",
+        "product_name": "",
+        "barcode": "",
+        "quantity": "",
+        "unit_price": "",
+        "discount": "",
+        "tax": "",
+        "line_total": ""
+      }
+    },
+    "payment": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "parent_sale_key_column": "",
+      "columns": {
+        "method": "",
+        "amount": "",
+        "currency": ""
+      }
+    },
+    "refund": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "parent_sale_key_column": "",
+      "columns": {
+        "reason": "",
+        "amount": "",
+        "status": ""
+      }
+    },
+    "product": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "columns": {
+        "name": "",
+        "barcode": "",
+        "sku": "",
+        "price": "",
+        "tax_code": "",
+        "active": ""
+      }
+    },
+    "cashier": {
+      "enabled": false,
+      "table": "",
+      "primary_key": "",
+      "event_time_column": "",
+      "columns": {
+        "username": "",
+        "display_name": "",
+        "active": ""
+      }
+    }
+  }
+}

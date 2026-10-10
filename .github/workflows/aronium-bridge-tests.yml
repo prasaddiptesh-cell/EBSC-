@@ -1,0 +1,35 @@
+name: Aronium Bridge Tests
+
+on:
+  push:
+    branches:
+      - main
+      - feature/aronium-sync-bridge-foundation
+    paths:
+      - "tools/aronium-bridge/**"
+      - ".github/workflows/aronium-bridge-tests.yml"
+  pull_request:
+    paths:
+      - "tools/aronium-bridge/**"
+      - ".github/workflows/aronium-bridge-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile bridge files
+        run: python -m py_compile tools/aronium-bridge/bridge.py tools/aronium-bridge/bridge_ui.py tools/aronium-bridge/schema_profile.py tools/aronium-bridge/extract_mapped.py
+      - name: Run bridge foundation tests
+        working-directory: tools/aronium-bridge
+        run: python -m unittest discover -s tests -v
