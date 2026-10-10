@@ -1,0 +1,14 @@
+{
+  "bridge_name": "Easy Buys Aronium Sync Bridge",
+  "shop_id": "S1",
+  "source_id": "S1-TILL1",
+  "shop_name": "Shop 1 - Drasa Avenue",
+  "register_name": "Till 1",
+  "database_path": "%LOCALAPPDATA%\\Aronium\\Data\\pos.db",
+  "queue_path": "data\\bridge-queue.db",
+  "schema_report_path": "schema-report.json",
+  "poll_interval_seconds": 10,
+  "cloud_sync_enabled": false,
+  "cloud_api_base_url": "",
+  "cloud_device_token_env": "EBSC_BRIDGE_TOKEN"
+}
