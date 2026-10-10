@@ -95,7 +95,10 @@ jobs:
             echo "FACE=missing" >> "$GITHUB_ENV"
           fi
           ls -la android/app/src/main/assets/face android/app/src/main/assets/face/model || true
-          cd android && chmod +x gradlew && ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=armeabi-v7a,arm64-v8a,x86_64
+          # Smaller app: one apk per kind of processor instead of one big apk with all of them (and no emulator code).
+          # The normal apk is for 64-bit tablets and phones; the "-32bit" one is only for older devices that cannot install it.
+          printf '\nandroid {\n  splits {\n    abi {\n      enable true\n      reset()\n      include "arm64-v8a", "armeabi-v7a"\n      universalApk false\n    }\n  }\n}\n' >> android/app/build.gradle
+          cd android && chmod +x gradlew && ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
       - name: Publish the apk
         env:
@@ -103,10 +106,13 @@ jobs:
         run: |
           VERSION=$(node -p "require('./app.json').expo.version")
           NAME="EasyBuys-v${VERSION}-build${{ github.run_number }}.apk"
-          cp android/app/build/outputs/apk/release/app-release.apk "../$NAME"
+          NAME32="EasyBuys-v${VERSION}-build${{ github.run_number }}-32bit.apk"
+          ls -la android/app/build/outputs/apk/release/
+          cp android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "../$NAME"
+          cp android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "../$NAME32"
           cd ..
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$NAME" --title "Latest app – Easy Buys v${VERSION} (build ${{ github.run_number }})" --notes "Open this page on the tablet or phone and tap the .apk to install. It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
+          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${{ github.run_number }})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
 
       - name: Keep a copy for 30 days
         uses: actions/upload-artifact@v4
