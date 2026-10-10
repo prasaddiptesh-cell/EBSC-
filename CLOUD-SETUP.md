@@ -26,7 +26,7 @@ The app works offline without this. Nothing is lost before setup: the app keeps 
 5. **Deploy › Manage deployments › ✏️ Edit › Version: New version › Deploy.** The web address stays the same,
    so the bakery tablet keeps working without any change.
 
-## Updating to app version 3.7 / 3.8 (once)
+## Updating to app version 3.7 / 3.8 / 3.9 (once – 3.9 needs no new cloud update)
 
 Version 3.7 adds the device controls (pause, access end date, remove, remote wipe, ask a device to sync or send its
 problem log) – the cloud enforces them, so it needs the new **Code.gs** (script version 6) once. Same 3 steps:
