@@ -322,7 +322,8 @@ def main() -> int:
         p = sub.add_parser(name, help=help_text)
         p.set_defaults(handler=handler)
         if name == "enqueue-json": p.add_argument("file", help="Path to a JSON file containing an events array")
-        if name in ("sync-queue", "watch-queue"): p.add_argument("--limit", type=int, default=50, help="Maximum events per upload batch (1-100)")\n        if name == "watch-queue": p.add_argument("--interval", type=int, default=10, help="Seconds between retries (5-300)")
+        if name in ("sync-queue", "watch-queue"): p.add_argument("--limit", type=int, default=50, help="Maximum events per upload batch (1-100)")
+        if name == "watch-queue": p.add_argument("--interval", type=int, default=10, help="Seconds between retries (5-300)")
     args = parser.parse_args()
     try:
         return int(args.handler(args))
