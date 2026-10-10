@@ -6,6 +6,8 @@ import json
 import os
 import sqlite3
 import sys
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -151,6 +153,144 @@ def status(_: argparse.Namespace) -> int:
     print("Last successful cloud sync: not configured")
     return 0
 
+def enqueue_json(args: argparse.Namespace) -> int:
+    """Queue already-mapped events from a local JSON file; does not read POS rows."""
+    cfg = load_config()
+    input_path = path_of(args.file)
+    try:
+        data = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Cannot read event JSON: {exc}")
+        return 2
+    events = data.get("events") if isinstance(data, dict) else None
+    if not isinstance(events, list):
+        print("Input must be a JSON object containing an events array.")
+        return 2
+    source_id = str(cfg["source_id"])
+    shop_id = str(cfg["shop_id"])
+    now = utc_now()
+    inserted = 0
+    with queue_connection(path_of(cfg["queue_path"])) as conn:
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            required = ("event_id", "entity_type", "source_record_id")
+            if any(not str(ev.get(k, "")).strip() for k in required):
+                continue
+            if ev.get("source_id") and str(ev["source_id"]) != source_id:
+                print(f"Skipping event {ev.get('event_id')}: source_id does not match this configured till.")
+                continue
+            ev["source_id"] = source_id
+            ev["shop_id"] = str(ev.get("shop_id") or shop_id)
+            idem = str(ev["event_id"])
+            payload = json.dumps(ev, separators=(",", ":"), ensure_ascii=False)
+            try:
+                conn.execute(
+                    "INSERT INTO sync_queue(source_id,entity_type,source_record_id,idempotency_key,payload_json,status,attempts,created_at_utc,updated_at_utc) "
+                    "VALUES(?,?,?,?,?,'pending',0,?,?)",
+                    (source_id, str(ev["entity_type"]), str(ev["source_record_id"]), idem, payload, now, now)
+                )
+                inserted += 1
+            except sqlite3.IntegrityError:
+                # Existing event ID is intentionally not duplicated.
+                continue
+        conn.commit()
+    print(f"Queued {inserted} new mapped events. Existing event IDs were not duplicated.")
+    return 0
+
+
+def sync_queue(args: argparse.Namespace) -> int:
+    """Upload queued, mapped events to the dedicated POS endpoint."""
+    cfg = load_config()
+    if not cfg.get("cloud_sync_enabled", False):
+        print("Cloud sync is disabled. No data was sent.")
+        return 2
+    base_url = str(cfg.get("cloud_api_base_url", "")).strip()
+    token_env = str(cfg.get("cloud_device_token_env", "EBSC_BRIDGE_TOKEN"))
+    token = os.environ.get(token_env, "")
+    if not base_url.startswith("https://") or not token:
+        print("Configure an HTTPS cloud_api_base_url and set the bridge token in the named environment variable.")
+        return 2
+    batch_limit = max(1, min(100, int(getattr(args, "limit", 50))))
+    queue_path = path_of(cfg["queue_path"])
+    with queue_connection(queue_path) as conn:
+        rows = conn.execute(
+            "SELECT id,source_id,entity_type,source_record_id,idempotency_key,payload_json,attempts "
+            "FROM sync_queue WHERE status='pending' ORDER BY id LIMIT ?", (batch_limit,)
+        ).fetchall()
+    if not rows:
+        print("No pending events.")
+        return 0
+    events = []
+    for row in rows:
+        try:
+            ev = json.loads(row["payload_json"])
+            # Ensure event identity used by the server is the persistent queue key.
+            ev["event_id"] = row["idempotency_key"]
+            ev["source_id"] = row["source_id"]
+            ev["entity_type"] = row["entity_type"]
+            ev["source_record_id"] = row["source_record_id"]
+            events.append(ev)
+        except (TypeError, json.JSONDecodeError):
+            with queue_connection(queue_path) as conn:
+                conn.execute("UPDATE sync_queue SET status='needs_review',last_error=?,updated_at_utc=? WHERE id=?",
+                             ("Invalid local JSON payload", utc_now(), row["id"]))
+                conn.commit()
+    if not events:
+        print("No valid pending events in this batch.")
+        return 2
+    body = json.dumps({"kind": "pos_ingest", "bridge_token": token, "events": events}).encode("utf-8")
+    request = urllib.request.Request(base_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        # Preserve pending status and record attempt/error so a retry is safe.
+        with queue_connection(queue_path) as conn:
+            for row in rows:
+                conn.execute("UPDATE sync_queue SET attempts=attempts+1,updated_at_utc=?,last_error=? WHERE id=? AND status='pending'",
+                             (utc_now(), str(exc)[:1000], row["id"]))
+            conn.commit()
+        print(f"Upload failed; events remain queued for retry: {exc}")
+        return 1
+    if not result.get("ok"):
+        with queue_connection(queue_path) as conn:
+            for row in rows:
+                conn.execute("UPDATE sync_queue SET attempts=attempts+1,updated_at_utc=?,last_error=? WHERE id=? AND status='pending'",
+                             (utc_now(), str(result.get("error", "Cloud rejected batch"))[:1000], row["id"]))
+            conn.commit()
+        print(f"Cloud rejected batch; events remain queued: {result.get('error', 'unknown error')}")
+        return 1
+    statuses = {str(item.get("event_id")): str(item.get("status")) for item in result.get("results", []) if isinstance(item, dict)}
+    rejected_ids = set()
+    for item in result.get("rejected", []):
+        if isinstance(item, dict) and item.get("event_id"):
+            rejected_ids.add(str(item["event_id"]))
+    sent = review = 0
+    with queue_connection(queue_path) as conn:
+        for row in rows:
+            key = str(row["idempotency_key"])
+            status = statuses.get(key)
+            if status in ("accepted", "already_processed"):
+                conn.execute("UPDATE sync_queue SET status='sent',attempts=attempts+1,updated_at_utc=?,last_error=NULL WHERE id=?",
+                             (utc_now(), row["id"]))
+                sent += 1
+            elif key in rejected_ids or status is None:
+                reason = "Rejected by cloud; review required" if key in rejected_ids else "Cloud response did not acknowledge this event"
+                conn.execute("UPDATE sync_queue SET status='needs_review',attempts=attempts+1,updated_at_utc=?,last_error=? WHERE id=?",
+                             (utc_now(), reason, row["id"]))
+                review += 1
+            else:
+                conn.execute("UPDATE sync_queue SET attempts=attempts+1,updated_at_utc=?,last_error=? WHERE id=?",
+                             (utc_now(), "Unexpected server acknowledgement: " + status, row["id"]))
+        conn.commit()
+    print(f"Cloud acknowledged: {sent}; moved to review: {review}.")
+    if result.get("rejected"):
+        print("Cloud rejections:")
+        print(json.dumps(result["rejected"], indent=2))
+    return 0 if review == 0 else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Easy Buys Aronium bridge foundation")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -159,9 +299,13 @@ def main() -> int:
         ("inspect-schema", "Write schema-only report without transaction rows", inspect_schema),
         ("init-queue", "Initialize local durable queue", init_queue),
         ("status", "Show bridge configuration and queue status", status),
+        ("enqueue-json", "Queue pre-mapped events from a local JSON file", enqueue_json),
+        ("sync-queue", "Upload pending events to configured Easy Buys POS API", sync_queue),
     ]:
         p = sub.add_parser(name, help=help_text)
         p.set_defaults(handler=handler)
+        if name == "enqueue-json": p.add_argument("file", help="Path to a JSON file containing an events array")
+        if name == "sync-queue": p.add_argument("--limit", type=int, default=50, help="Maximum events per upload batch (1-100)")
     args = parser.parse_args()
     try:
         return int(args.handler(args))
