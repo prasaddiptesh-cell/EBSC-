@@ -9,7 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
 EXAMPLE = HERE / "config.example.json"
 
@@ -115,14 +115,15 @@ class BridgeUI(tk.Tk):
                 ttk.Button(form, text="Browse…", command=browse).grid(row=i, column=2, padx=(6, 0))
         form.columnconfigure(1, weight=1)
         cloud_enabled = tk.BooleanVar(value=bool(cfg.get("cloud_sync_enabled", False)))
-        ttk.Checkbutton(form, text="Enable cloud uploads (only after API and database mapping are verified)",
-                        variable=cloud_enabled).grid(row=len(fields), column=0, columnspan=3, sticky="w", pady=(10, 4))
+        cloud_enabled.set(False)
+        ttk.Checkbutton(form, text="Cloud uploads (not yet enabled for this test build)",
+                        variable=cloud_enabled, state="disabled").grid(row=len(fields), column=0, columnspan=3, sticky="w", pady=(10, 4))
         ttk.Label(form, text="Keep this off until a test endpoint and approved source mapping are ready. The bridge token must be stored in a Windows environment variable.",
                   wraplength=700).grid(row=len(fields)+1, column=0, columnspan=3, sticky="w", pady=(2, 10))
         def save():
             for key, var in variables.items():
                 cfg[key] = var.get().strip()
-            cfg["cloud_sync_enabled"] = bool(cloud_enabled.get())
+            cfg["cloud_sync_enabled"] = False
             try:
                 CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
             except Exception as exc:
@@ -136,11 +137,14 @@ class BridgeUI(tk.Tk):
     def run_command(self, command: str, background: bool = True):
         def work():
             try:
-                result = subprocess.run(
-                    [sys.executable, str(HERE / "bridge.py"), command],
-                    cwd=str(HERE), capture_output=True, text=True, timeout=90
-                )
-                output = f"$ python bridge.py {command}\n{result.stdout}{result.stderr}\nExit code: {result.returncode}"
+                if getattr(sys, "frozen", False):
+                    cmd = [sys.executable, "--bridge-command", command]
+                    display = f"$ EasyBuysAroniumBridge.exe {command}"
+                else:
+                    cmd = [sys.executable, str(HERE / "bridge.py"), command]
+                    display = f"$ python bridge.py {command}"
+                result = subprocess.run(cmd, cwd=str(HERE), capture_output=True, text=True, timeout=90)
+                output = f"{display}\n{result.stdout}{result.stderr}\nExit code: {result.returncode}"
             except Exception as exc:
                 output = f"Could not run {command}: {exc}"
             self.after(0, lambda: self.append_log(output))
