@@ -105,14 +105,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(node -p "require('./app.json').expo.version")
-          NAME="EasyBuys-v${VERSION}-build${{ github.run_number }}.apk"
-          NAME32="EasyBuys-v${VERSION}-build${{ github.run_number }}-32bit.apk"
+          CODE=$(node -p "require('./app.json').expo.android.versionCode")
+          NAME="EasyBuys-v${VERSION}-build${CODE}.apk"
+          NAME32="EasyBuys-v${VERSION}-build${CODE}-32bit.apk"
           ls -la android/app/build/outputs/apk/release/
           cp android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "../$NAME"
           cp android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "../$NAME32"
           cd ..
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${{ github.run_number }})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
+          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
 
       - name: Keep a copy for 30 days
         uses: actions/upload-artifact@v4

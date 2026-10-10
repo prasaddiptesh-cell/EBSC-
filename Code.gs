@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 4;                 // v3.5: support email, backup list / fetch
+const SCRIPT_VERSION = 5;                 // v3.6: Start fresh (go-live)
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -80,6 +80,7 @@ function doPost(e) {
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
     if (body.kind === 'device_status') return json_(deviceStatus_(body.id, body.status, who));
     if (body.kind === 'cloud_settings') return json_(cloudSettings_(body));
+    if (body.kind === 'fresh_start') return json_(freshStart_(body));
     switch (body.kind) {
       case 'ping':
         return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: SCRIPT_VERSION });
@@ -221,6 +222,17 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      case 'payslip_email': {
+        // v3.5 payslips: only to an address saved in a person's pay details (or onboarding) – a device cannot email anyone else.
+        const to = cleanEmails_([body.to]);
+        if (!to.length) return json_({ ok: false, error: 'No valid email address.' });
+        if (!payEmail_(to[0]) && !staffEmail_(to[0])) return json_({ ok: false, error: 'This address is not in anyone\'s pay details.' });
+        const atts = (body.attachments || []).slice(0, 2).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'payslip.pdf'); });
+        MailApp.sendEmail({ to: to[0], subject: String(body.subject || 'Easy Buys payslip').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        log_('Emails', [to[0], body.subject, atts.length + ' attachment(s)']);
+        return json_({ ok: true });
+      }
+
       case 'support_email': {
         // v3.5 "Send to support": problem reports go only to the app's support address (fixed here, not chosen by the device).
         MailApp.sendEmail({ to: SUPPORT_EMAIL, subject: String(body.subject || 'Easy Buys problem report').slice(0, 200),
@@ -265,6 +277,14 @@ function doPost(e) {
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message ? err.message : err) });
   }
+}
+
+// v3.5: payslip addresses are the ones saved in Payroll › Pay details (synced pay_profiles).
+function payEmail_(addr) {
+  const a = String(addr).trim().toLowerCase();
+  const sh = data_().getSheetByName('T_pay_profiles');
+  if (!sh) return false;
+  return values_(sh).some(function (r) { try { return String(JSON.parse(r[4] || '{}').email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
 }
 
 function staffEmail_(addr) {
@@ -471,6 +491,8 @@ function push_(records, deviceId) {
   return withLock_(function () {
     const props = PropertiesService.getScriptProperties();
     let seq = Number(props.getProperty('SEQ') || '0');
+    let fresh = null;
+    try { fresh = JSON.parse(props.getProperty('FRESH') || 'null'); } catch (e) { fresh = null; }
     const changes = sheet_('Changes', CHANGES_HEADER);
     const byTable = {};
     records.forEach(function (r) {
@@ -491,6 +513,7 @@ function push_(records, deviceId) {
         const updated = String(r.u || (r.row && r.row.updated_at) || '');
         const have = index[key];
         if (have && have.updated > updated) { rejected.push({ t: table, k: key, why: 'newer change already in the cloud' }); return; }
+        if (fresh && fresh.tables.indexOf(table) >= 0 && updated && updated < fresh.at) { rejected.push({ t: table, k: key, why: 'from before the fresh start' }); return; }
         seq += 1;
         const line = [key, updated, deviceId, seq, JSON.stringify(r.row || {})];
         let rowNo;
@@ -690,3 +713,46 @@ function setup() {
 // Optional: new devices must be approved by the owner before they sync. Run once to turn on/off.
 function requireApprovalOn() { PropertiesService.getScriptProperties().setProperty('REQUIRE_APPROVAL', '1'); }
 function requireApprovalOff() { PropertiesService.getScriptProperties().setProperty('REQUIRE_APPROVAL', '0'); }
+
+// ================================================================ v3.6 Start fresh (go-live)
+// Only the main tablet (signed in with the cloud key) may do it. The listed tables are emptied (the owner logins stay),
+// the change list keeps working (old entries just point at nothing), and records from before the fresh start that a
+// device still had waiting are refused when they arrive. Test photos and documents move to a "Test data" folder.
+function freshStart_(body) {
+  if (!body.key || body.key !== API_KEY) return { ok: false, error: 'Start fresh only from the main tablet (the one holding the cloud key).' };
+  const tables = (body.tables || []).filter(function (t) { return /^[a-z_0-9]+$/.test(t); });
+  const at = String(body.at || '');
+  if (!tables.length || !at) return { ok: false, error: 'Nothing to clear.' };
+  return withLock_(function () {
+    const ss = data_();
+    let cleared = 0;
+    tables.forEach(function (t) {
+      const sh = ss.getSheetByName('T_' + t);
+      if (!sh || sh.getLastRow() < 2) return;
+      const rows = values_(sh);
+      const keep = rows.filter(function (r) {
+        let row = {};
+        try { row = JSON.parse(r[4] || '{}'); } catch (e) { row = {}; }
+        if (String(r[1]) >= at) return true;                       // made after the fresh start
+        if (t === 'users' && row.role === 'owner') return true;     // owner logins stay
+        if (t === 'shared_settings' && String(r[0]) === 'fresh_start') return true;
+        return false;
+      });
+      cleared += rows.length - keep.length;
+      sh.getRange(2, 1, rows.length, sh.getLastColumn()).clearContent();
+      if (keep.length) sh.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
+    });
+    PropertiesService.getScriptProperties().setProperty('FRESH', JSON.stringify({ id: String(body.id || ''), at: at, tables: tables }));
+    let moved = 0;
+    if (body.moveFiles) {
+      const root = root_();
+      const test = root.createFolder('Test data (before go-live) ' + at.slice(0, 10));
+      ['Photos', 'Documents', 'Reports', 'Purchase orders'].forEach(function (name) {
+        const it = root.getFoldersByName(name);
+        while (it.hasNext()) { it.next().moveTo(test); moved += 1; }
+      });
+    }
+    log_('Fresh start', [String(body.id || ''), at, tables.length, cleared]);
+    return { ok: true, cleared: cleared, foldersMoved: moved };
+  });
+}

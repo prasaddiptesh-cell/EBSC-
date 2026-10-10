@@ -26,6 +26,14 @@ The app works offline without this. Nothing is lost before setup: the app keeps 
 5. **Deploy › Manage deployments › ✏️ Edit › Version: New version › Deploy.** The web address stays the same,
    so the bakery tablet keeps working without any change.
 
+## Updating to app version 3.6 (once)
+
+Version 3.6 adds **Start fresh** (clearing the test data on every device and in the cloud before going live). The cloud
+needs the new **Code.gs** (script version 5) once – same 3 steps as before, nothing else in the Google setup changes:
+1. Open the Easy Buys script (Extensions › Apps Script from the Easy Buys sheet).
+2. Replace everything in `Code.gs` with the new **Code.gs**, put the two values back, 💾 **Save**.
+3. **Deploy › Manage deployments › ✏️ Edit › Version: New version › Deploy.** The web address stays the same.
+
 ## Updating to app version 3.5 (once)
 Version 3.5 adds "Send to support" problem reports and lets Admin › Backup & restore list and bring back the daily
 backups kept in Google Drive. The cloud needs the new **Code.gs** once – same 3 steps as before:
