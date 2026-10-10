@@ -33,6 +33,8 @@ class BridgeUI(tk.Tk):
             ("Configure", self.open_config_dialog),
             ("Validate database", lambda: self.run_command("validate")),
             ("Inspect schema", lambda: self.run_command("inspect-schema")),
+            ("Profile schema", lambda: self.run_command("profile-schema")),
+            ("Extract mapped", lambda: self.run_command("extract-mapped")),
             ("Initialize queue", lambda: self.run_command("init-queue")),
             ("Sync pending queue", lambda: self.run_command("sync-queue")),
             ("Refresh status", lambda: self.refresh_status),
