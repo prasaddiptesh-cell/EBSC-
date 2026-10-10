@@ -37,7 +37,7 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumBridge --collect-all tkinter app.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumBridge app.py
       - name: Assemble portable test package
         shell: pwsh
         run: |
