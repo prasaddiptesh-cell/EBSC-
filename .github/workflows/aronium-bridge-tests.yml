@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile bridge files
-        run: python -m py_compile tools/aronium-bridge/bridge.py tools/aronium-bridge/bridge_ui.py
+        run: python -m py_compile tools/aronium-bridge/bridge.py tools/aronium-bridge/bridge_ui.py tools/aronium-bridge/schema_profile.py tools/aronium-bridge/extract_mapped.py
       - name: Run bridge foundation tests
         working-directory: tools/aronium-bridge
         run: python -m unittest discover -s tests -v
