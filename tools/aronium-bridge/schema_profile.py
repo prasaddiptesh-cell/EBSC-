@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from contextlib import closing
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -27,7 +28,7 @@ def main():
     }
     uri = db.as_uri() + "?mode=ro"
     results = []
-    with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
         rows = conn.execute("SELECT name,type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
