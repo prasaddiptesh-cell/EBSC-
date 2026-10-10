@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 5;                 // v3.6: Start fresh (go-live)
+const SCRIPT_VERSION = 6;                 // v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -70,15 +70,19 @@ function doPost(e) {
     const body = JSON.parse(e.postData.contents);
     // --- the main Easy Buys software (office PC) ---
     if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices') return json_(mainApi_(body));
+    if (body.kind === 'main_files' || body.kind === 'main_file_get') return json_(mainFiles_(body)); // v3.5 Windows software: full file mirror
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
     const who = auth_(body);
-    if (!who.ok) return json_({ ok: false, error: who.error, blocked: !!who.blocked, waiting: !!who.waiting });
+    if (!who.ok) return json_({ ok: false, error: who.error, blocked: !!who.blocked, waiting: !!who.waiting, lock: who.lock || null, wipe: !!who.wipe, removed: !!who.removed });
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId));
-    if (body.kind === 'pull') return json_(pull_(Number(body.since) || 0, who.deviceId, false));
+    if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false); devicePulled_(who.deviceId, body, out); return json_(out); }
     if (body.kind === 'invite_create') return json_(inviteCreate_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
     if (body.kind === 'device_status') return json_(deviceStatus_(body.id, body.status, who));
+    if (body.kind === 'device_control') return json_(deviceControl_(body, who));
+    if (body.kind === 'problem_log') return json_(problemLogSave_(body, who));
+    if (body.kind === 'problem_log_get') return json_(problemLogGet_(body.id));
     if (body.kind === 'cloud_settings') return json_(cloudSettings_(body));
     if (body.kind === 'fresh_start') return json_(freshStart_(body));
     switch (body.kind) {
@@ -152,6 +156,8 @@ function doPost(e) {
       }
 
       case 'file_put': {
+        // v3.5 apps send an upload id + fingerprint: filed by type, checked, never duplicated (see filePut_).
+        if (body.uploadId) return json_(filePut_(body, who));
         // Documents kept by the app (licences, applications, contracts…): Easy Buys › Documents › <section>.
         const sect = String(body.folder || 'other').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 40) || 'other';
         const name = String(body.fileName || 'document').replace(/[\\/]/g, '-').slice(0, 120);
@@ -160,6 +166,8 @@ function doPost(e) {
       }
 
       case 'file_get': {
+        // v3.5: the role of the person logged in on the device is checked against the document visibility setting.
+        if (body.user || fileRow_(String(body.id || ''))) return json_(fileGet_(body, who));
         // Only files kept under Easy Buys › Documents can be fetched.
         const file = DriveApp.getFileById(String(body.id || ''));
         const docs = path_(['Documents']).getId();
@@ -171,28 +179,21 @@ function doPost(e) {
       }
 
       case 'backup': {
+        if (body.tier) return json_(backupTiered_(body, who)); // v3.5: daily (30 days) / monthly (12 months) + manifest
         const folder = path_(['Backups']);
         saveFile_(folder, body.fileName, Utilities.base64Encode(body.data, Utilities.Charset.UTF_8), 'application/json');
         return json_({ ok: true });
       }
 
       case 'backup_list': {
-        // v3.5: the daily backups kept in Drive › Backups (newest first) for Admin › Backup & restore.
-        const it = path_(['Backups']).getFiles();
-        const list = [];
-        while (it.hasNext()) { const f = it.next(); list.push({ id: f.getId(), name: f.getName(), size: f.getSize(), at: f.getDateCreated().toISOString() }); }
-        list.sort(function (a, b) { return a.at < b.at ? 1 : -1; });
-        return json_({ ok: true, files: list.slice(0, Number(body.limit) || 60) });
+        // v3.5: the backups kept in Drive › Backups, › Daily, › Monthly and › Manual (newest first) for Admin › Backup & restore.
+        return json_({ ok: true, files: backupFiles_().slice(0, Number(body.limit) || 60) });
       }
 
       case 'backup_get': {
         // Only files kept in Easy Buys › Backups can be fetched this way.
         const file = DriveApp.getFileById(String(body.id || ''));
-        const backups = path_(['Backups']).getId();
-        let inside = false;
-        const ps = file.getParents();
-        while (ps.hasNext() && !inside) if (ps.next().getId() === backups) inside = true;
-        if (!inside) return json_({ ok: false, error: 'Not an Easy Buys backup.' });
+        if (!insideFolder_(file, path_(['Backups']).getId(), 2)) return json_({ ok: false, error: 'Not an Easy Buys backup.' });
         return json_({ ok: true, name: file.getName(), text: file.getBlob().getDataAsString('UTF-8') });
       }
 
@@ -233,6 +234,16 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      case 'pack_email': {
+        // 1.0 monthly accountant pack: only to the addresses the owner saved in Admin › Emails (synced setting).
+        const to = prefEmails_('accountant_pack');
+        if (!to.length) return json_({ ok: false, error: 'No accountant email saved in Admin › Emails.' });
+        const atts = (body.attachments || []).slice(0, 3).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/octet-stream', a.name || 'pack.xlsx'); });
+        MailApp.sendEmail({ to: to.join(','), subject: String(body.subject || 'Easy Buys accountant pack').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
+        return json_({ ok: true, emailed: to.length });
+      }
+
       case 'support_email': {
         // v3.5 "Send to support": problem reports go only to the app's support address (fixed here, not chosen by the device).
         MailApp.sendEmail({ to: SUPPORT_EMAIL, subject: String(body.subject || 'Easy Buys problem report').slice(0, 200),
@@ -268,6 +279,14 @@ function doPost(e) {
         return json_({ ok: true, events: n });
       }
 
+      case 'myday_events':
+        // v3.5 My day: the Easy Buys account's own calendar → meetings for one day (read only).
+        return json_(mydayEvents_(String(body.date || '')));
+
+      case 'myday_out':
+        // v3.5 My day: the app tasks of one day → the separate "Easy Buys – My day" calendar (made if missing).
+        return json_(mydayOut_(String(body.date || ''), body.items || [], String(body.calendar || '')));
+
       case 'viber':
         return json_(viber_(String(body.text || '').slice(0, 7000)));
 
@@ -285,6 +304,23 @@ function payEmail_(addr) {
   const sh = data_().getSheetByName('T_pay_profiles');
   if (!sh) return false;
   return values_(sh).some(function (r) { try { return String(JSON.parse(r[4] || '{}').email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
+}
+
+// Addresses saved in Admin › Emails for one kind of email (from the synced shared settings), when it is not Off.
+function prefEmails_(type) {
+  const sh = data_().getSheetByName('T_shared_settings');
+  if (!sh) return [];
+  let out = [];
+  values_(sh).forEach(function (r) {
+    if (String(r[0]) !== 'email_prefs') return;
+    try {
+      const row = JSON.parse(r[4] || '{}');
+      const prefs = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+      const p = prefs && prefs[type];
+      if (p && p.mode && p.mode !== 'off') out = cleanEmails_(p.to || []);
+    } catch (e) { /* ignore */ }
+  });
+  return out;
 }
 
 function staffEmail_(addr) {
@@ -566,8 +602,12 @@ function pull_(since, deviceId, forMain) {
 
 // ================================================================ devices & invites
 function devices_() {
+  const all = ctlAll_();
   return values_(sheet_('Devices', DEVICE_HEADER)).map(function (r) {
-    return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8] };
+    const c = all[String(r[0])] || {};
+    return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8],
+      until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
+      attempts: c.attempts || [], waitingCmds: (c.cmds || []).length, wipe: c.wipe || null, lastLog: c.lastLog || null };
   });
 }
 function findDevice_(match) {
@@ -597,9 +637,12 @@ function auth_(body) {
   if (body.token) {
     const h = sha_(body.token);
     const d = findDevice_(function (r) { return String(r[4]) === h; });
-    if (!d) return { ok: false, error: 'This device is not linked any more. Link it again from another device (Admin › Devices).' };
+    if (!d) { noteAttemptByToken_(h); return { ok: false, removed: true, error: 'This device is not linked any more. Link it again from another device (Admin › Devices).' }; }
+    if (d.v[3] === 'blocked') noteAttempt_(String(d.v[0]), 'blocked');
     if (d.v[3] === 'blocked') return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' };
     if (d.v[3] === 'waiting') return { ok: false, waiting: true, error: 'Waiting for the owner to approve this device.' };
+    const g = gate_(String(d.v[0]), d);
+    if (g) return g;
     touchDevice_(body, String(d.v[0]));
     return { ok: true, deviceId: String(d.v[0]) };
   }
@@ -607,7 +650,9 @@ function auth_(body) {
   if (body.key !== API_KEY) return { ok: false, error: 'Wrong cloud key. Copy the key from the app into the cloud program.' };
   const id = deviceId || 'first-device';
   const d = findDevice_(function (r) { return String(r[0]) === id; });
-  if (d && d.v[3] === 'blocked') return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' };
+  if (d && d.v[3] === 'blocked') { noteAttempt_(id, 'blocked'); return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' }; }
+  if (d && d.v[3] === 'removed') { noteAttempt_(id, 'removed'); return { ok: false, removed: true, error: 'This device was removed by the owner. Link it again.' }; }
+  if (d) { const g = gate_(id, d); if (g) return g; }
   touchDevice_(body, id, { status: 'active', note: 'linked with the cloud key' });
   return { ok: true, deviceId: id };
 }
@@ -680,6 +725,93 @@ function deviceStatus_(id, status, who) {
   if (!d) return { ok: false, error: 'Device not found.' };
   d.sh.getRange(d.row, 4).setValue(status);
   return { ok: true, devices: devices_() };
+}
+
+// ---------------------------------------------------------------- v3.6 device control (Admin › Devices)
+// Kept in a script property: { [deviceId]: { until, endDate, shop, roles, name, cmds: [], hist: [], attempts: [], stat, wipe, removedTokens } }.
+function ctlAll_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('DEVCTL') || '{}'); } catch (e) { return {}; } }
+function ctlSave_(all) { PropertiesService.getScriptProperties().setProperty('DEVCTL', JSON.stringify(all)); }
+function ctl_(all, id) { all[id] = all[id] || { cmds: [], hist: [], attempts: [] }; return all[id]; }
+function hist_(c, text, by) { c.hist = [{ at: now_(), text: text, by: by || '' }].concat(c.hist || []).slice(0, 25); }
+function noteAttempt_(id, why) {
+  const all = ctlAll_(); const c = ctl_(all, id);
+  c.attempts = [{ at: now_(), why: why }].concat(c.attempts || []).slice(0, 10);
+  ctlSave_(all);
+}
+function noteAttemptByToken_(h) {
+  const all = ctlAll_();
+  Object.keys(all).forEach(function (id) { if ((all[id].removedTokens || []).indexOf(h) >= 0) { const c = all[id]; c.attempts = [{ at: now_(), why: 'removed' }].concat(c.attempts || []).slice(0, 10); } });
+  ctlSave_(all);
+}
+// Refuse a suspended, ended or wiped device (enforced here, whatever the device does).
+function gate_(id, d) {
+  const all = ctlAll_();
+  const c = all[id];
+  if (!c) return null;
+  if (c.wipe === 'pending') {
+    c.wipe = 'done'; hist_(c, 'Wiped (the device cleared its data)', 'cloud');
+    if (d && d.sh) { c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); }
+    ctlSave_(all);
+    return { ok: false, wipe: true, removed: true, error: 'The owner wiped this device.' };
+  }
+  const nowIso = now_();
+  if (c.until) {
+    if (c.until > nowIso) { c.attempts = [{ at: nowIso, why: 'suspended' }].concat(c.attempts || []).slice(0, 10); ctlSave_(all); return { ok: false, lock: { kind: 'suspended', until: c.until }, error: 'Access paused by the owner until ' + c.until.slice(0, 16).replace('T', ' ') + '.' }; }
+    delete c.until; hist_(c, 'Pause ended', 'cloud'); ctlSave_(all);
+  }
+  if (c.endDate && c.endDate < nowIso.slice(0, 10)) {
+    c.attempts = [{ at: nowIso, why: 'ended' }].concat(c.attempts || []).slice(0, 10); ctlSave_(all);
+    return { ok: false, lock: { kind: 'ended', until: c.endDate }, error: 'Access for this device ended on ' + c.endDate + '.' };
+  }
+  return null;
+}
+// What the device reports on each pull (waiting items, last health check / backup / login), and what it is told back.
+function devicePulled_(id, body, out) {
+  const all = ctlAll_(); const c = ctl_(all, id);
+  if (body.stat) c.stat = { at: now_(), pending: body.stat.pending, health: body.stat.health || null, backup: body.stat.backup || null, login: body.stat.login || null };
+  out.control = { shop: c.shop || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
+  out.commands = c.cmds || [];
+  c.cmds = [];
+  ctlSave_(all);
+}
+const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe'];
+function deviceControl_(body, who) {
+  return withLock_(function () {
+    const id = String(body.id || '');
+    const a = String(body.action || '');
+    if (DEVICE_ACTIONS.indexOf(a) < 0) return { ok: false, error: 'Unknown action.' };
+    const d = findDevice_(function (r) { return String(r[0]) === id; });
+    if (!d) return { ok: false, error: 'Device not found.' };
+    if (id === String(who.deviceId) && ['suspend', 'block', 'remove', 'wipe', 'end'].indexOf(a) >= 0) return { ok: false, error: 'A device cannot do that to itself. Use another device.' };
+    const all = ctlAll_(); const c = ctl_(all, id);
+    const by = String(body.by || '') + ' @ ' + who.deviceId;
+    if (a === 'suspend') {
+      const until = String(body.until || '');
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(until)) return { ok: false, error: 'Until when? Choose a date and time.' };
+      c.until = until; hist_(c, 'Paused until ' + until.slice(0, 16).replace('T', ' '), by);
+    } else if (a === 'block') { d.sh.getRange(d.row, 4).setValue('blocked'); hist_(c, 'Blocked', by); }
+    else if (a === 'allow') { d.sh.getRange(d.row, 4).setValue('active'); delete c.until; if (c.endDate && c.endDate < now_().slice(0, 10)) delete c.endDate; hist_(c, 'Allowed again', by); }
+    else if (a === 'remove') { c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); hist_(c, 'Removed (must be linked again with a new invite)', by); }
+    else if (a === 'rename') { const n = String(body.name || '').trim(); if (!n) return { ok: false, error: 'Type the new name.' }; c.name = n; d.sh.getRange(d.row, 2).setValue(n); hist_(c, 'Renamed to ' + n, by); }
+    else if (a === 'shop') { c.shop = String(body.shop || '') || null; hist_(c, 'Shop set to ' + (c.shop || 'none'), by); }
+    else if (a === 'roles') { c.roles = (body.roles || []).map(String); hist_(c, c.roles.length ? 'Only these roles may log in: ' + c.roles.join(', ') : 'Every role may log in', by); }
+    else if (a === 'end') { const e = String(body.endDate || ''); if (e && !/^\d{4}-\d{2}-\d{2}$/.test(e)) return { ok: false, error: 'Choose the last day.' }; c.endDate = e || null; hist_(c, e ? 'Access ends after ' + e : 'No end date', by); }
+    else if (a === 'wipe') { c.wipe = 'pending'; hist_(c, 'Wipe asked (on its next contact)', by); }
+    else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
+    ctlSave_(all);
+    return { ok: true, devices: devices_() };
+  });
+}
+function problemLogSave_(body, who) {
+  const text = String(body.text || '').slice(0, 45000);
+  sheet_('Problem logs', ['at', 'device', 'text']).appendRow([now_(), who.deviceId, text]);
+  const all = ctlAll_(); const c = ctl_(all, who.deviceId); c.lastLog = now_(); hist_(c, 'Sent its problem log', 'device'); ctlSave_(all);
+  return { ok: true };
+}
+function problemLogGet_(id) {
+  const rows = values_(sheet_('Problem logs', ['at', 'device', 'text'])).filter(function (r) { return String(r[1]) === String(id); });
+  const last = rows[rows.length - 1];
+  return { ok: true, at: last ? last[0] : null, text: last ? String(last[2]) : '' };
 }
 
 // Settings changed from the app (Admin › Devices), so nobody has to open the Google editor again.
@@ -755,4 +887,259 @@ function freshStart_(body) {
     log_('Fresh start', [String(body.id || ''), at, tables.length, cleared]);
     return { ok: true, cleared: cleared, foldersMoved: moved };
   });
+}
+
+// ---------------------------------------------------------------- v3.5 My day (Google Calendar)
+const MYDAY_CAL = 'Easy Buys – My day';
+function mydayDay_(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Bad date');
+  return new Date(date + 'T00:00:00');
+}
+// Meetings on one day from the default (main) calendar of the Easy Buys account. The app's own calendars are left out.
+function mydayEvents_(date) {
+  const day = mydayDay_(date);
+  const tz = Session.getScriptTimeZone();
+  const cal = CalendarApp.getDefaultCalendar();
+  if (!cal || cal.getName().indexOf('Easy Buys Roster – ') === 0 || cal.getName() === MYDAY_CAL) return { ok: true, events: [] };
+  const events = cal.getEventsForDay(day).filter(function (ev) { return ev.getTag('ebmd') !== '1' && ev.getTag('eb') !== '1'; }).map(function (ev) {
+    const vis = ev.getVisibility ? String(ev.getVisibility()) : '';
+    return {
+      id: ev.getId(), title: ev.getTitle(), allDay: ev.isAllDayEvent(),
+      start: Utilities.formatDate(ev.getStartTime(), tz, 'HH:mm'), end: Utilities.formatDate(ev.getEndTime(), tz, 'HH:mm'),
+      location: ev.getLocation ? ev.getLocation() : '', private: /PRIVATE|CONFIDENTIAL/i.test(vis),
+    };
+  });
+  return { ok: true, date: date, events: events };
+}
+// The day's app tasks replace whatever the app put in the "Easy Buys – My day" calendar for that day before.
+function mydayOut_(date, items, name) {
+  const day = mydayDay_(date);
+  const tz = Session.getScriptTimeZone();
+  const calName = MYDAY_CAL; // always the app's own calendar, whatever a device sends
+  const cal = CalendarApp.getCalendarsByName(calName)[0] || CalendarApp.createCalendar(calName, { timeZone: tz });
+  const end = new Date(day.getTime() + 86400000);
+  cal.getEvents(day, end).forEach(function (ev) { if (ev.getTag('ebmd') === '1') ev.deleteEvent(); });
+  let n = 0;
+  (items || []).slice(0, 200).forEach(function (x) {
+    if (!/^\d{2}:\d{2}$/.test(String(x.start)) || !/^\d{2}:\d{2}$/.test(String(x.end))) return;
+    const st = new Date(date + 'T' + x.start + ':00');
+    let en = new Date(date + 'T' + x.end + ':00');
+    if (en <= st) en = new Date(st.getTime() + 15 * 60000);
+    const ev = cal.createEvent(String(x.title || 'Task').slice(0, 200), st, en, { description: String(x.note || '') });
+    ev.setTag('ebmd', '1');
+    if (x.key) ev.setTag('key', String(x.key).slice(0, 200));
+    n += 1;
+  });
+  return { ok: true, events: n, calendar: calName };
+}
+
+// ================================================================ v3.5 documents in Drive, visibility, backups
+// Every finished document: Easy Buys › Documents › <type folder> [› year › month]. One row per upload in the
+// "Files" sheet: a repeated upload id returns the file already there (no duplicates on retry), and the size and
+// SHA-256 of what arrived are returned so the device can check the upload.
+const FILES_HEADER = ['upload_id', 'file_id', 'name', 'path', 'size', 'sha256', 'doc_type', 'access', 'device', 'uploaded_at', 'ref_uid', 'mime'];
+const RESTRICTED_ROLES = ['payroll', 'admin', 'owner'];
+function filesSheet_() { return sheet_('Files', FILES_HEADER); }
+function hex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
+function bytesSha_(bytes) { return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes)); }
+function cleanName_(s, max) { return String(s || '').replace(/[\\/:*?"<>|]+/g, '-').replace(/^\.+/, '').trim().slice(0, max || 60); }
+function fileRow_(fileId) {
+  if (!fileId) return null;
+  const sh = data_().getSheetByName('Files');
+  if (!sh) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) if (String(rows[i][1]) === String(fileId)) return rows[i];
+  return null;
+}
+function insideFolder_(file, folderId, depth) {
+  let level = [];
+  const ps = file.getParents();
+  while (ps.hasNext()) level.push(ps.next());
+  for (let d = 0; d < (depth || 1) && level.length; d++) {
+    const next = [];
+    for (let i = 0; i < level.length; i++) {
+      if (level[i].getId() === folderId) return true;
+      const up = level[i].getParents();
+      while (up.hasNext()) next.push(up.next());
+    }
+    level = next;
+  }
+  return false;
+}
+
+function filePut_(body, who) {
+  return withLock_(function () {
+    const uploadId = String(body.uploadId).slice(0, 80);
+    const sh = filesSheet_();
+    const rows = values_(sh);
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]) !== uploadId) continue;
+      try {
+        const old = DriveApp.getFileById(String(rows[i][1]));
+        if (!old.isTrashed()) return { ok: true, id: old.getId(), url: old.getUrl(), size: Number(rows[i][4]), sha256: String(rows[i][5]), existing: true };
+      } catch (e) { /* gone: upload again below */ }
+    }
+    const bytes = Utilities.base64Decode(String(body.data || ''));
+    const sha = bytesSha_(bytes);
+    if (body.sha256 && sha !== String(body.sha256).toLowerCase()) return { ok: false, error: 'The file arrived damaged (its fingerprint is different). It will be sent again.' };
+    if (body.size !== undefined && Number(body.size) !== bytes.length) return { ok: false, error: 'The file arrived incomplete. It will be sent again.' };
+    const path = (Array.isArray(body.path) ? body.path : [body.folder || 'other']).slice(0, 4).map(function (n) { return cleanName_(n, 50); }).filter(String);
+    const name = cleanName_(body.fileName || 'document', 120);
+    const mime = String(body.mime || 'application/octet-stream');
+    const f = path_(['Documents'].concat(path.length ? path : ['other'])).createFile(Utilities.newBlob(bytes, mime, name));
+    sh.appendRow([uploadId, f.getId(), name, path.join(' / '), String(bytes.length), sha, String(body.docType || ''), String(body.access || 'normal'), who.deviceId, now_(), String(body.refUid || ''), mime]);
+    return { ok: true, id: f.getId(), url: f.getUrl(), size: bytes.length, sha256: sha };
+  });
+}
+
+// The role of a person, from the staff records synced to the cloud (not what the device says).
+function userRole_(uid) {
+  if (!uid) return null;
+  const sh = data_().getSheetByName('T_users');
+  if (!sh) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) !== String(uid)) continue;
+    let u = {};
+    try { u = JSON.parse(rows[i][4] || '{}'); } catch (e) { u = {}; }
+    if (String(u.active) === '0') return { role: '', active: false };
+    return { role: String(u.role || ''), active: true };
+  }
+  return null;
+}
+function sharedSetting_(key) {
+  const sh = data_().getSheetByName('T_shared_settings');
+  if (!sh) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) !== key) continue;
+    try { return JSON.parse(JSON.parse(rows[i][4] || '{}').value || 'null'); } catch (e) { return null; }
+  }
+  return null;
+}
+// Documents uploaded by v3.4 apps: type and access class from the synced document list.
+function legacyDocType_(fileId) {
+  const sh = data_().getSheetByName('T_documents');
+  if (!sh) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) {
+    let d = {};
+    try { d = JSON.parse(rows[i][4] || '{}'); } catch (e) { continue; }
+    if (String(d.cloud_id) !== String(fileId)) continue;
+    const ref = String(d.ref_type || '');
+    const type = d.doc_type || ({ contract: 'contract', applicant: 'contract', licence: 'licence', invoice: 'invoice', payment: 'payment' }[ref] || 'report');
+    return { type: type, access: d.access_class || (type === 'contract' || type === 'payslip' ? 'restricted' : 'normal') };
+  }
+  return null;
+}
+// May this person see this type of document? Same rule as the app (Admin › Documents › Who can see documents).
+function docAllowed_(user, type, access, legacyFile) {
+  if (!user || !user.uid) {
+    // Older apps (v3.4) do not say who is logged in: they keep opening what they could before, never restricted files.
+    if (access === 'restricted' && !legacyFile) return { ok: false, error: 'Update the Easy Buys app to open this document.' };
+    return { ok: true };
+  }
+  const who = userRole_(user.uid);
+  if (!who) return { ok: false, error: 'Your login has not reached the cloud yet. Tap Sync now, then try again.' };
+  if (!who.active) return { ok: false, error: 'This login is not active.' };
+  if (who.role === 'owner' || who.role === 'admin') return { ok: true };
+  const vis = sharedSetting_('doc_visibility') || {};
+  const roles = Array.isArray(vis[type]) ? vis[type] : (access === 'restricted' ? RESTRICTED_ROLES : null);
+  if (roles && roles.indexOf(who.role) < 0) return { ok: false, error: 'Your role may not open this type of document. Ask the owner.' };
+  return { ok: true };
+}
+function fileGet_(body, who) {
+  const id = String(body.id || '');
+  const row = fileRow_(id);
+  let file;
+  try { file = DriveApp.getFileById(id); file.getName(); } catch (e) { return { ok: false, error: 'This file is no longer in Google Drive.' }; }
+  if (!row && !insideFolder_(file, path_(['Documents']).getId(), 5)) return { ok: false, error: 'Not an Easy Buys document.' };
+  const legacy = row ? null : legacyDocType_(id);
+  const type = row ? String(row[6] || '') : legacy ? legacy.type : '';
+  const access = row ? String(row[7] || 'normal') : legacy ? legacy.access : 'normal';
+  const allowed = docAllowed_(body.user, type, access, !row);
+  if (!allowed.ok) { log_('Refused', [who.deviceId, body.user ? body.user.uid : '(old app)', id, type, allowed.error]); return allowed; }
+  const bytes = file.getBlob().getBytes();
+  return { ok: true, data: Utilities.base64Encode(bytes), mime: file.getMimeType(), name: file.getName(), size: bytes.length, sha256: bytesSha_(bytes) };
+}
+
+// Nightly backups from the main tablet: Backups › Daily (kept 30 days) and the first one of each month also in
+// Backups › Monthly (kept 12 months), each with a file manifest (every document and photo and where its copy is).
+const DAILY_KEEP_DAYS = 30;
+const MONTHLY_KEEP = 12;
+function backupTiered_(body, who) {
+  const root = path_(['Backups']);
+  const tier = body.tier === 'manual' ? 'Manual' : 'Daily';
+  const folder = folder_(root, tier);
+  const name = cleanName_(body.fileName || ('backup-' + now_().slice(0, 10) + '.json'), 80);
+  const f = saveFile_(folder, name, Utilities.base64Encode(String(body.data || ''), Utilities.Charset.UTF_8), 'application/json');
+  const manifestName = name.replace(/\.json$/, '') + '-manifest.json';
+  const m = body.manifest ? saveFile_(folder, manifestName, Utilities.base64Encode(String(body.manifest), Utilities.Charset.UTF_8), 'application/json') : null;
+  let monthly = false;
+  if (tier === 'Daily') {
+    const month = String(body.date || now_()).slice(0, 7);
+    const mf = folder_(root, 'Monthly');
+    const it = mf.getFiles();
+    let have = false;
+    while (it.hasNext()) if (it.next().getName().indexOf('backup-' + month) === 0) have = true;
+    if (!have) { f.makeCopy(name, mf); if (m) m.makeCopy(manifestName, mf); monthly = true; }
+    pruneBackups_(folder, function (date) { return date < daysAgo_(DAILY_KEEP_DAYS); });
+    pruneBackups_(mf, function (date) { return date.slice(0, 7) < monthsAgo_(MONTHLY_KEEP - 1); });
+  }
+  log_('Backups', [who.deviceId, tier, name, monthly ? 'also monthly' : '']);
+  return { ok: true, id: f.getId(), manifestId: m ? m.getId() : null, monthly: monthly };
+}
+function daysAgo_(n) { return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10); }
+function monthsAgo_(n) { const d = new Date(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - n); return d.toISOString().slice(0, 7); }
+// Backups older than the limit go to the Drive bin (Google keeps them there 30 more days).
+function pruneBackups_(folder, tooOld) {
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    const m = /^backup-(\d{4}-\d{2}-\d{2})/.exec(f.getName());
+    if (m && tooOld(m[1])) f.setTrashed(true);
+  }
+}
+function backupFiles_() {
+  const root = path_(['Backups']);
+  const list = [];
+  const add = function (folder, tier) {
+    const it = folder.getFiles();
+    while (it.hasNext()) {
+      const f = it.next();
+      if (/-manifest\.json$/.test(f.getName())) continue;
+      list.push({ id: f.getId(), name: f.getName(), size: f.getSize(), at: f.getDateCreated().toISOString(), tier: tier });
+    }
+  };
+  add(root, 'Older');
+  ['Daily', 'Monthly', 'Manual'].forEach(function (t) { const it = root.getFoldersByName(t); if (it.hasNext()) add(it.next(), t); });
+  list.sort(function (a, b) { return a.at < b.at ? 1 : -1; });
+  return list;
+}
+
+// ================================================================ v3.5 Windows software: full file mirror
+// main_files: every document filed since a time (and the backups); main_file_get: one file with its fingerprint.
+// Protected by the main-software key (Script properties › MAIN_KEY, made by setup()).
+function mainFiles_(body) {
+  const key = PropertiesService.getScriptProperties().getProperty('MAIN_KEY');
+  if (!key || body.key !== key) return { ok: false, error: 'Not allowed' };
+  if (body.kind === 'main_file_get') {
+    const id = String(body.id || '');
+    let file;
+    try { file = DriveApp.getFileById(id); file.getName(); } catch (e) { return { ok: false, error: 'Not found' }; }
+    if (!fileRow_(id) && !insideFolder_(file, path_(['Documents']).getId(), 5) && !insideFolder_(file, path_(['Backups']).getId(), 2)) return { ok: false, error: 'Not an Easy Buys file' };
+    const bytes = file.getBlob().getBytes();
+    return { ok: true, id: id, name: file.getName(), mime: file.getMimeType(), size: bytes.length, sha256: bytesSha_(bytes), data: Utilities.base64Encode(bytes) };
+  }
+  const since = String(body.since || '');
+  const sh = data_().getSheetByName('Files');
+  const files = (sh ? values_(sh) : []).filter(function (r) { return String(r[9]) > since; }).map(function (r) {
+    return { kind: 'document', uploadId: r[0], id: r[1], name: r[2], path: r[3], size: Number(r[4]), sha256: r[5], docType: r[6], access: r[7], device: r[8], at: r[9], refUid: r[10], mime: r[11] };
+  });
+  backupFiles_().forEach(function (b) { if (b.at > since) files.push({ kind: 'backup', id: b.id, name: b.name, path: 'Backups / ' + b.tier, size: b.size, at: b.at }); });
+  files.sort(function (a, b) { return a.at < b.at ? -1 : 1; });
+  const limit = Math.min(1000, Number(body.limit) || 500);
+  const page = files.slice(0, limit);
+  PropertiesService.getScriptProperties().setProperty('LAST_MAIN_SYNC', now_());
+  return { ok: true, files: page, next: page.length ? page[page.length - 1].at : since, more: files.length > limit };
 }
