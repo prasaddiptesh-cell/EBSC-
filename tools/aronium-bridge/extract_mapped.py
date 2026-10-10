@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from contextlib import closing
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -33,7 +34,7 @@ def main():
     entities = mapping.get("entities", {})
     inserted = 0
     stamp = now()
-    with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=5) as source:
+    with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=5)) as source:
         source.row_factory = sqlite3.Row
         source.execute("PRAGMA query_only = ON")
         table_rows = source.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'").fetchall()
@@ -65,7 +66,7 @@ def main():
             print("No mapping is enabled. No source records were extracted.")
             return
         queue_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(queue_path, timeout=10) as queue:
+        with closing(sqlite3.connect(queue_path, timeout=10)) as queue:
             queue.execute("PRAGMA journal_mode=WAL")
             queue.executescript("""
             CREATE TABLE IF NOT EXISTS bridge_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
