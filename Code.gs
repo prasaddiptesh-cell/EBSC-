@@ -826,5 +826,5 @@ function setupPosBridgeToken() {
   if (!props.getProperty('POS_BRIDGE_TOKEN')) {
     props.setProperty('POS_BRIDGE_TOKEN', Utilities.getUuid() + Utilities.getUuid());
   }
-  Logger.log('POS bridge token is configured. Retrieve it only from a restricted, private execution log and store it securely.');
+  Logger.log('POS_BRIDGE_TOKEN (copy to a secure Windows environment variable; never commit or share it): ' + props.getProperty('POS_BRIDGE_TOKEN'));
 }
