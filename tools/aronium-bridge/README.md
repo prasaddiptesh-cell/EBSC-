@@ -10,6 +10,8 @@ The dedicated cloud ingestion/query API and a queue upload client are now presen
 ## Included
 - Python 3.11+ foundation with standard library only
 - Read-only SQLite connection and schema-only inspection
+- Standalone schema profiler (table row counts and candidate roles, no row contents)
+- Explicit field mapping template and read-only mapped extractor into the local queue
 - Durable local queue database with unique idempotency keys
 - Local validation and status commands
 - Cloud sync disabled by default
@@ -20,10 +22,22 @@ The dedicated cloud ingestion/query API and a queue upload client are now presen
 3. Set the actual database path, shop ID and unique source ID.
 4. Run: python bridge.py validate
 5. Run: python bridge.py inspect-schema
-6. Run: python bridge.py init-queue
-7. Run: python bridge.py status
+6. Run: python schema_profile.py
+7. Run: python bridge.py init-queue
+8. Run: python bridge.py status
 
 Aronium Lite commonly uses %LOCALAPPDATA%\Aronium\Data\pos.db. Confirm the path inside Aronium at Settings, Database, Open database location. Do not assume every installation uses the default.
+
+## Mapping and extraction
+
+1. Copy `mapping.example.json` to `mapping.json`.
+2. Use `schema-report.json` and `schema-profile.json` to identify the actual table/column names.
+3. Fill the mapping with verified identifiers; keep every `enabled` flag false until reviewed.
+4. After mapping review on a test database, enable only one entity at a time and run `python extract_mapped.py`.
+5. The extractor only reads mapped columns and adds stable source IDs to the local queue. Existing event IDs are not duplicated; changed existing source records are not automatically revised and need a correction workflow.
+6. Keep cloud sync off during schema discovery and extraction tests.
+
+For a step-by-step friend-laptop test, see `SETUP-TEST-LAPTOP.md`.
 
 ## Safety
 - Source database is opened read-only.
