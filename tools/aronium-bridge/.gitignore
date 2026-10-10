@@ -1,0 +1,6 @@
+config.json
+data/
+schema-report.json
+*.log
+__pycache__/
+.venv/
