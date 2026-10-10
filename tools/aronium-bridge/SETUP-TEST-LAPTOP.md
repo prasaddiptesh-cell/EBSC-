@@ -23,7 +23,7 @@ Do not use production source IDs or cloud credentials on the friend's laptop.
 python --version
 python bridge.py validate
 python bridge.py inspect-schema
-python bridge.py profile-schema
+python schema_profile.py
 python bridge.py init-queue
 python bridge.py status
 \`\`\`
