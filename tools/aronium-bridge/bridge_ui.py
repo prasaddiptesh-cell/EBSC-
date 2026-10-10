@@ -30,7 +30,7 @@ class BridgeUI(tk.Tk):
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=(0, 12))
         for label, command in [
-            ("Configure", self.configure),
+            ("Configure", self.open_config_dialog),
             ("Validate database", lambda: self.run_command("validate")),
             ("Inspect schema", lambda: self.run_command("inspect-schema")),
             ("Initialize queue", lambda: self.run_command("init-queue")),
@@ -68,7 +68,7 @@ class BridgeUI(tk.Tk):
             self.install_label.configure(text="Could not read config.json. Use Configure to correct it.")
             self.append_log(f"Configuration error: {exc}")
 
-    def configure(self):
+    def open_config_dialog(self):
         if not CONFIG.exists():
             try:
                 CONFIG.write_text(EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
