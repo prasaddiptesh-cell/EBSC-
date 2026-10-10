@@ -9,6 +9,7 @@ import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,7 @@ def validate(_: argparse.Namespace) -> int:
         print("Database file not found. Confirm its location in Aronium Settings > Database.")
         return 2
     try:
-        with connect_source(db) as conn:
+        with closing(connect_source(db)) as conn:
             check = conn.execute("PRAGMA quick_check").fetchone()[0]
         print(f"Read-only database check: {check}")
         return 0 if check == "ok" else 3
@@ -129,7 +130,7 @@ def queue_connection(path: Path) -> sqlite3.Connection:
 def init_queue(_: argparse.Namespace) -> int:
     cfg = load_config()
     path = path_of(cfg["queue_path"])
-    with queue_connection(path) as conn:
+    with closing(queue_connection(path)) as conn:
         count = conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0]
     print(f"Queue initialized: {path}; queued records: {count}")
     print("No cloud upload was attempted.")
@@ -145,7 +146,7 @@ def status(_: argparse.Namespace) -> int:
     if not queue.exists():
         print("Queue not initialized. Run: python bridge.py init-queue")
         return 0
-    with queue_connection(queue) as conn:
+    with closing(queue_connection(queue)) as conn:
         rows = conn.execute("SELECT status,COUNT(*) AS n FROM sync_queue GROUP BY status").fetchall()
     counts = {r["status"]: r["n"] for r in rows}
     for state in ("pending", "in_progress", "sent", "needs_review"):
@@ -213,7 +214,7 @@ def sync_queue(args: argparse.Namespace) -> int:
         return 2
     batch_limit = max(1, min(100, int(getattr(args, "limit", 50))))
     queue_path = path_of(cfg["queue_path"])
-    with queue_connection(queue_path) as conn:
+    with closing(queue_connection(queue_path)) as conn:
         rows = conn.execute(
             "SELECT id,source_id,entity_type,source_record_id,idempotency_key,payload_json,attempts "
             "FROM sync_queue WHERE status='pending' ORDER BY id LIMIT ?", (batch_limit,)
