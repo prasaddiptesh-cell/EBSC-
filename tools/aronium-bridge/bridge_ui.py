@@ -34,6 +34,7 @@ class BridgeUI(tk.Tk):
             ("Validate database", lambda: self.run_command("validate")),
             ("Inspect schema", lambda: self.run_command("inspect-schema")),
             ("Initialize queue", lambda: self.run_command("init-queue")),
+            ("Sync pending queue", lambda: self.run_command("sync-queue")),
             ("Refresh status", lambda: self.refresh_status),
         ]:
             if label == "Refresh status":
@@ -95,6 +96,8 @@ class BridgeUI(tk.Tk):
             ("database_path", "Aronium database path"),
             ("queue_path", "Local queue path"),
             ("schema_report_path", "Schema report path"),
+            ("cloud_api_base_url", "Cloud web app URL (HTTPS)"),
+            ("cloud_device_token_env", "Token environment variable name"),
         ]
         variables = {}
         for i, (key, label) in enumerate(fields):
@@ -111,12 +114,15 @@ class BridgeUI(tk.Tk):
                         v.set(picked)
                 ttk.Button(form, text="Browse…", command=browse).grid(row=i, column=2, padx=(6, 0))
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="Cloud upload is intentionally disabled until the Easy Buys API is verified.",
-                  wraplength=600).grid(row=len(fields), column=0, columnspan=3, sticky="w", pady=(10, 12))
+        cloud_enabled = tk.BooleanVar(value=bool(cfg.get("cloud_sync_enabled", False)))
+        ttk.Checkbutton(form, text="Enable cloud uploads (only after API and database mapping are verified)",
+                        variable=cloud_enabled).grid(row=len(fields), column=0, columnspan=3, sticky="w", pady=(10, 4))
+        ttk.Label(form, text="Keep this off until a test endpoint and approved source mapping are ready. The bridge token must be stored in a Windows environment variable.",
+                  wraplength=700).grid(row=len(fields)+1, column=0, columnspan=3, sticky="w", pady=(2, 10))
         def save():
             for key, var in variables.items():
                 cfg[key] = var.get().strip()
-            cfg["cloud_sync_enabled"] = False
+            cfg["cloud_sync_enabled"] = bool(cloud_enabled.get())
             try:
                 CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
             except Exception as exc:
