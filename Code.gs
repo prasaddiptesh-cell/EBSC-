@@ -22,6 +22,8 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
+const SCRIPT_VERSION = 4;                 // v3.5: support email, backup list / fetch
+const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
 
@@ -80,7 +82,7 @@ function doPost(e) {
     if (body.kind === 'cloud_settings') return json_(cloudSettings_(body));
     switch (body.kind) {
       case 'ping':
-        return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: 3 });
+        return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: SCRIPT_VERSION });
 
       case 'snapshot': {
         const props = PropertiesService.getScriptProperties();
@@ -97,7 +99,7 @@ function doPost(e) {
         const maxSeq = Number(props.getProperty('PLAN_SEQ') || '0');
         const since = Number(body.planSeq || 0) > maxSeq ? 0 : Number(body.planSeq || 0); // cloud program was reset → resend
         const edits = planEdits_().filter(function (x) { return x.seq > since; });
-        return json_({ ok: true, planEdits: edits });
+        return json_({ ok: true, planEdits: edits, version: SCRIPT_VERSION });
       }
 
       case 'report': {
@@ -173,6 +175,26 @@ function doPost(e) {
         return json_({ ok: true });
       }
 
+      case 'backup_list': {
+        // v3.5: the daily backups kept in Drive › Backups (newest first) for Admin › Backup & restore.
+        const it = path_(['Backups']).getFiles();
+        const list = [];
+        while (it.hasNext()) { const f = it.next(); list.push({ id: f.getId(), name: f.getName(), size: f.getSize(), at: f.getDateCreated().toISOString() }); }
+        list.sort(function (a, b) { return a.at < b.at ? 1 : -1; });
+        return json_({ ok: true, files: list.slice(0, Number(body.limit) || 60) });
+      }
+
+      case 'backup_get': {
+        // Only files kept in Easy Buys › Backups can be fetched this way.
+        const file = DriveApp.getFileById(String(body.id || ''));
+        const backups = path_(['Backups']).getId();
+        let inside = false;
+        const ps = file.getParents();
+        while (ps.hasNext() && !inside) if (ps.next().getId() === backups) inside = true;
+        if (!inside) return json_({ ok: false, error: 'Not an Easy Buys backup.' });
+        return json_({ ok: true, name: file.getName(), text: file.getBlob().getDataAsString('UTF-8') });
+      }
+
       case 'viber_setup': {
         // Viber Channel "Post API": the token comes from the channel's Settings › Developer tools. Kept only here.
         const token = String(body.token || '').trim();
@@ -196,6 +218,14 @@ function doPost(e) {
         const atts = (body.attachments || []).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'document.pdf'); });
         MailApp.sendEmail({ to: to.join(','), subject: String(body.subject || 'Easy Buys'), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
         log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
+        return json_({ ok: true });
+      }
+
+      case 'support_email': {
+        // v3.5 "Send to support": problem reports go only to the app's support address (fixed here, not chosen by the device).
+        MailApp.sendEmail({ to: SUPPORT_EMAIL, subject: String(body.subject || 'Easy Buys problem report').slice(0, 200),
+          body: String(body.text || '').slice(0, 60000) + '\n\nDevice: ' + who.deviceId, name: 'Easy Buys' });
+        log_('Emails', [SUPPORT_EMAIL, body.subject, 'support']);
         return json_({ ok: true });
       }
 

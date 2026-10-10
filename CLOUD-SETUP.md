@@ -26,6 +26,15 @@ The app works offline without this. Nothing is lost before setup: the app keeps 
 5. **Deploy › Manage deployments › ✏️ Edit › Version: New version › Deploy.** The web address stays the same,
    so the bakery tablet keeps working without any change.
 
+## Updating to app version 3.5 (once)
+Version 3.5 adds "Send to support" problem reports and lets Admin › Backup & restore list and bring back the daily
+backups kept in Google Drive. The cloud needs the new **Code.gs** once – same 3 steps as before:
+1. **https://script.google.com** › your Easy Buys cloud project › copy `API_KEY` and `DASHBOARD_PASSWORD` somewhere safe.
+2. Replace everything in `Code.gs` with the new **Code.gs**, put the two values back, 💾 **Save**.
+3. **Deploy › Manage deployments › ✏️ Edit › Version: New version › Deploy.** The web address stays the same.
+No new permissions are needed. Devices do **not** need to be linked again. The app keeps working with the old script
+until you do this (only "Send to support" and the Drive backup list wait for it).
+
 ## Updating to app version 3.4 (once)
 Version 3.4 keeps documents (licence copies, applications, your company contract PDF, signed contracts) in
 Google Drive › **Easy Buys › Documents**, so any linked device can open them. The cloud needs the new **Code.gs** once:
