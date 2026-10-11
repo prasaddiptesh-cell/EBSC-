@@ -56,21 +56,6 @@ jobs:
           python -m pip install pillow
           python tests\preview_ui.py window-preview.png
 
-      - name: Keep the picture and test output (branch link-preview)
-        if: always()
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP\pv | Out-Null
-          Copy-Item link\window-preview*.png $env:RUNNER_TEMP\pv\ -ErrorAction SilentlyContinue
-          Copy-Item link\test-output.txt $env:RUNNER_TEMP\pv\ -ErrorAction SilentlyContinue
-          if (-not (Get-ChildItem $env:RUNNER_TEMP\pv)) { exit 0 }
-          Set-Location $env:RUNNER_TEMP\pv
-          git init -q
-          git config user.name "build"; git config user.email "build@users.noreply.github.com"
-          git add -A; git commit -qm "Window preview, build ${{ github.run_number }}"
-          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/link-preview
-
       - name: Build the program
         working-directory: link
         run: |
@@ -106,6 +91,8 @@ jobs:
         working-directory: link
         shell: pwsh
         run: |
+          Start-Transcript -Path installer-check.txt -Force | Out-Null
+          $ErrorActionPreference = 'Continue'
           $p = Start-Process -FilePath output\EasyBuysAroniumLink-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -PassThru -Wait
           if ($p.ExitCode -ne 0) { Write-Error "install exit code $($p.ExitCode)"; exit 1 }
           $exe = Join-Path $env:ProgramFiles 'Easy Buys\Aronium Link\EasyBuysAroniumLink.exe'
@@ -140,3 +127,19 @@ jobs:
           $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
           Copy-Item output\EasyBuysAroniumLink-Setup.exe .
           gh release create link-latest EasyBuysAroniumLink-Setup.exe EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs) - version $ver build ${{ github.run_number }}" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
+
+      - name: Keep the picture and test output (branch link-preview)
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP\pv | Out-Null
+          Copy-Item link\window-preview*.png $env:RUNNER_TEMP\pv\ -ErrorAction SilentlyContinue
+          Copy-Item link\test-output.txt $env:RUNNER_TEMP\pv\ -ErrorAction SilentlyContinue
+          Copy-Item link\installer-check.txt $env:RUNNER_TEMP\pv\ -ErrorAction SilentlyContinue
+          if (-not (Get-ChildItem $env:RUNNER_TEMP\pv)) { exit 0 }
+          Set-Location $env:RUNNER_TEMP\pv
+          git init -q
+          git config user.name "build"; git config user.email "build@users.noreply.github.com"
+          git add -A; git commit -qm "Window preview, build ${{ github.run_number }}"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/link-preview
