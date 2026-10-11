@@ -57,11 +57,11 @@ jobs:
         run: |
           if (-not (Test-Path link\window-preview.png)) { exit 0 }
           New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP\pv | Out-Null
-          Copy-Item link\window-preview.png $env:RUNNER_TEMP\pv\
+          Copy-Item link\window-preview*.png $env:RUNNER_TEMP\pv\
           Set-Location $env:RUNNER_TEMP\pv
           git init -q
           git config user.name "build"; git config user.email "build@users.noreply.github.com"
-          git add window-preview.png; git commit -qm "Window preview, build ${{ github.run_number }}"
+          git add *.png; git commit -qm "Window preview, build ${{ github.run_number }}"
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/link-preview
 
       - name: Build the program
