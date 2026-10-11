@@ -83,6 +83,42 @@ jobs:
           if (Test-Path "$env:EASYBUYS_LINK_HOME\crash.log") { Get-Content "$env:EASYBUYS_LINK_HOME\crash.log"; Write-Error "The program crashed"; exit 1 }
           if ($p.ExitCode -gt 1) { Write-Error "The program did not start properly"; exit 1 }
 
+      - name: Make the installer
+        working-directory: link
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress | Out-Null
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { Write-Error "Inno Setup not found"; exit 1 }
+          $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
+          & $iscc.FullName "/DAppVersion=$ver" "/DBuild=${{ github.run_number }}" installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Item output\EasyBuysAroniumLink-Setup.exe
+
+      - name: Check the installer (install, start, uninstall)
+        working-directory: link
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath output\EasyBuysAroniumLink-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { Write-Error "install exit code $($p.ExitCode)"; exit 1 }
+          $exe = Join-Path $env:ProgramFiles 'Easy Buys\Aronium Link\EasyBuysAroniumLink.exe'
+          if (-not (Test-Path $exe)) { Write-Error "not installed at $exe"; exit 1 }
+          $reg = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Get-ItemProperty | Where-Object { $_.DisplayName -eq 'Easy Buys Aronium Link' }
+          if (-not $reg) { Write-Error "not in the Apps list"; exit 1 }
+          Write-Host "Apps list: $($reg.DisplayName) $($reg.DisplayVersion) by $($reg.Publisher)"
+          $env:EASYBUYS_LINK_HOME = "$env:RUNNER_TEMP\linkhome2"
+          $c = Start-Process -FilePath $exe -ArgumentList '--check' -PassThru
+          if (-not $c.WaitForExit(90000)) { Write-Error "installed copy did not finish its check"; exit 1 }
+          if ($c.ExitCode -gt 1) { Write-Error "installed copy did not start properly"; exit 1 }
+          # install again over the top (an update)
+          $p = Start-Process -FilePath output\EasyBuysAroniumLink-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { Write-Error "update install exit code $($p.ExitCode)"; exit 1 }
+          $un = Join-Path $env:ProgramFiles 'Easy Buys\Aronium Link\unins000.exe'
+          $u = Start-Process -FilePath $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
+          Start-Sleep -Seconds 5
+          if (Test-Path $exe) { Write-Error "uninstall left the program behind"; exit 1 }
+          Write-Host "install, update and uninstall all fine"
+
       - name: Package and publish
         working-directory: link
         shell: pwsh
@@ -95,4 +131,5 @@ jobs:
           Compress-Archive -Path pkg\* -DestinationPath EasyBuysAroniumLink-Windows.zip -Force
           gh release delete link-latest --yes --cleanup-tag 2>$null
           $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
-          gh release create link-latest EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs) - version $ver build ${{ github.run_number }}" --notes "Download on each till PC, unzip, open EasyBuysAroniumLink.exe and follow the steps in the window. It only reads Aronium - it never changes Aronium."
+          Copy-Item output\EasyBuysAroniumLink-Setup.exe .
+          gh release create link-latest EasyBuysAroniumLink-Setup.exe EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs) - version $ver build ${{ github.run_number }}" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
