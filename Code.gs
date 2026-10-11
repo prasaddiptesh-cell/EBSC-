@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 7;                 // v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 8;                 // v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -68,6 +68,8 @@ function cleanEmails_(list) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    // Viber calls this address (the channel's webhook) to check it is alive, and with channel events: just say OK.
+    if (body && body.event && !body.kind) return json_({ ok: true });
     try { viberUnshare_(); } catch (x) { /* never stops a request */ }
     // --- the main Easy Buys software (office PC) ---
     if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices' || body.kind === 'main_link_check') return json_(mainApi_(body));
@@ -150,7 +152,7 @@ function doPost(e) {
       case 'ocr': {
         // Read the text of invoice photos with Google's free OCR (needs Services › Drive API added once).
         if (typeof Drive === 'undefined' || !Drive.Files) return json_({ ok: true, off: true });
-        const texts = (body.files || []).slice(0, 4).map(function (f, i) {
+        const texts = (body.files || []).slice(0, 6).map(function (f, i) {
           return ocr_(Utilities.newBlob(Utilities.base64Decode(f.data), f.mimeType || 'image/jpeg', 'page-' + (i + 1) + '.jpg'));
         });
         return json_({ ok: true, text: texts.join('\n') });
@@ -208,6 +210,7 @@ function doPost(e) {
         if (!token) { PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN'); return json_({ ok: true, message: 'Viber Channel disconnected.' }); }
         PropertiesService.getScriptProperties().setProperty('VIBER_TOKEN', token);
         PropertiesService.getScriptProperties().deleteProperty('VIBER_FROM');
+        if (/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(body.selfUrl || ''))) PropertiesService.getScriptProperties().setProperty('VIBER_HOOK_URL', String(body.selfUrl));
         const t = viber_('Easy Buys alerts are connected to this channel.');
         if (!t.ok) PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN');
         return json_(t.ok ? { ok: true, message: 'Connected – a test message was sent to the channel.' } : t);
@@ -353,8 +356,25 @@ function viber_(text) {
     from = admin.id;
     props.setProperty('VIBER_FROM', from);
   }
-  const r = call('post', { from: from, type: 'text', text: text });
+  let r = call('post', { from: from, type: 'text', text: text });
+  if (r.status !== 0 && /webhook/i.test(String(r.status_message || ''))) {
+    const h = viberWebhook_(call);
+    if (!h.ok) return h;
+    r = call('post', { from: from, type: 'text', text: text });
+  }
   if (r.status !== 0) { props.deleteProperty('VIBER_FROM'); return { ok: false, error: 'Viber: ' + (r.status_message || 'not sent') }; }
+  return { ok: true };
+}
+// A Viber Channel only takes posts once it has a webhook: this cloud's own web address (Viber checks it answers).
+function viberWebhook_(call) {
+  const props = PropertiesService.getScriptProperties();
+  let url = props.getProperty('VIBER_HOOK_URL') || '';
+  if (!url) { try { url = ScriptApp.getService().getUrl() || ''; } catch (e) { url = ''; } }
+  url = url.replace(/\/dev$/, '/exec');
+  if (!/^https:\/\//.test(url)) return { ok: false, error: 'Viber: the cloud does not know its own web address yet – deploy it as a web app (Deploy › Manage deployments), then try again.' };
+  const w = call('set_webhook', { url: url, event_types: [], send_name: false, send_photo: false });
+  if (w.status !== 0) return { ok: false, error: 'Viber: could not set the channel webhook – ' + (w.status_message || 'refused') };
+  props.setProperty('VIBER_HOOK_URL', url);
   return { ok: true };
 }
 
@@ -403,6 +423,30 @@ function viberUnshare_() {
     try { DriveApp.getFileById(x.id).setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE); } catch (e) { /* gone already */ }
   });
   props.setProperty('VIBER_SHARED', JSON.stringify(keep));
+  viberCleanup_();
+}
+// v8: the copies made for Viber (Drive › Viber posts) go to the Drive bin after 30 days (once a day, at most 150 files
+// a time). The Viber Channel keeps its own copy; the originals stay with the invoice / cheque in the app and in Drive.
+function viberCleanup_() {
+  const props = PropertiesService.getScriptProperties();
+  const today = Utilities.formatDate(new Date(), 'Pacific/Fiji', 'yyyy-MM-dd');
+  if (props.getProperty('VIBER_CLEANED') === today) return;
+  props.setProperty('VIBER_CLEANED', today);
+  try {
+    const roots = root_().getFoldersByName('Viber posts');
+    if (!roots.hasNext()) return;
+    const cutoff = Date.now() - 30 * 86400000;
+    let n = 0;
+    const months = roots.next().getFolders();
+    while (months.hasNext() && n < 150) {
+      const files = months.next().getFiles();
+      while (files.hasNext() && n < 150) {
+        const f = files.next();
+        if (f.getDateCreated().getTime() < cutoff) { try { f.setTrashed(true); n++; } catch (e) { /* next time */ } }
+      }
+    }
+    if (n) log_('Viber copies binned', [n]);
+  } catch (e) { /* never stops a request */ }
 }
 
 function ocr_(blob) {
