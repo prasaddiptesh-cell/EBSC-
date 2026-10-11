@@ -36,15 +36,37 @@ jobs:
           python-version: "3.12"
           architecture: "x64"
 
+      - name: Stamp the version and build number
+        working-directory: link
+        run: python tests\stamp_build.py ${{ github.run_number }} ${{ github.sha }}
+
       - name: Run the checks
         working-directory: link
         run: python -m unittest discover -s tests -v
+
+      - name: Picture of the window (for checking the look)
+        working-directory: link
+        continue-on-error: true
+        run: |
+          python -m pip install pillow
+          python tests\preview_ui.py window-preview.png
+
+      - name: Keep the picture
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-preview
+          path: link/window-preview.png
+          if-no-files-found: ignore
 
       - name: Build the program
         working-directory: link
         run: |
           python -m pip install --upgrade pip pyinstaller
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumLink app.py
+          $icon = if (Test-Path assets\icon.ico) { @('--icon', 'assets\icon.ico', '--add-data', 'assets;assets') } else { @() }
+          if (Test-Path version.txt) { $icon += @('--version-file', 'version.txt') }
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumLink @icon app.py
 
       - name: Check the program starts (no window)
         working-directory: link
@@ -68,4 +90,5 @@ jobs:
           Copy-Item README.md pkg\ -ErrorAction SilentlyContinue
           Compress-Archive -Path pkg\* -DestinationPath EasyBuysAroniumLink-Windows.zip -Force
           gh release delete link-latest --yes --cleanup-tag 2>$null
-          gh release create link-latest EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs)" --notes "Download on each till PC, unzip, open EasyBuysAroniumLink.exe and follow the steps in the window. It only reads Aronium - it never changes Aronium."
+          $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
+          gh release create link-latest EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs) - version $ver build ${{ github.run_number }}" --notes "Download on each till PC, unzip, open EasyBuysAroniumLink.exe and follow the steps in the window. It only reads Aronium - it never changes Aronium."
