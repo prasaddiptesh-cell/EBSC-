@@ -1,0 +1,69 @@
+# Builds the Easy Buys Aronium Link for the till PCs (Windows .exe) from EasyBuys.zip.
+# When it shows a green tick: Releases › "Aronium Link for Windows" › download the .zip on each till PC.
+# The link only READS Aronium - it never changes anything in Aronium.
+name: Build Windows Aronium Link
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths: ["EasyBuys.zip", "AroniumLink.zip", ".github/workflows/build-windows-link.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Unpack the link (AroniumLink.zip, else EasyBuys.zip)
+        shell: pwsh
+        run: |
+          $zip = if (Test-Path AroniumLink.zip) { 'AroniumLink.zip' } else { 'EasyBuys.zip' }
+          Write-Host "Building from $zip"
+          Expand-Archive -Path $zip -DestinationPath unz -Force
+          $src = Get-ChildItem -Path unz -Recurse -Directory -Filter aronium-bridge | Select-Object -First 1
+          if (-not $src) { Write-Error "tools/aronium-bridge is not in EasyBuys.zip"; exit 1 }
+          Move-Item $src.FullName link
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Run the checks
+        working-directory: link
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the program
+        working-directory: link
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name EasyBuysAroniumLink app.py
+
+      - name: Check the program starts (no window)
+        working-directory: link
+        shell: pwsh
+        run: |
+          $env:EASYBUYS_LINK_HOME = "$env:RUNNER_TEMP\linkhome"
+          $p = Start-Process -FilePath dist\EasyBuysAroniumLink.exe -ArgumentList "--check" -Wait -PassThru
+          Write-Host "check exit code: $($p.ExitCode) (1 = settings not filled in yet, which is expected here)"
+          if ($p.ExitCode -gt 1) { Write-Error "The program did not start properly"; exit 1 }
+
+      - name: Package and publish
+        working-directory: link
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item dist\EasyBuysAroniumLink.exe pkg\
+          Copy-Item README.md pkg\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path pkg\* -DestinationPath EasyBuysAroniumLink-Windows.zip -Force
+          gh release delete link-latest --yes --cleanup-tag 2>$null
+          gh release create link-latest EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs)" --notes "Download on each till PC, unzip, open EasyBuysAroniumLink.exe and follow the steps in the window. It only reads Aronium - it never changes Aronium."
