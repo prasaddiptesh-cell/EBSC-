@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 6;                 // v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 7;                 // v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -68,8 +68,9 @@ function cleanEmails_(list) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    try { viberUnshare_(); } catch (x) { /* never stops a request */ }
     // --- the main Easy Buys software (office PC) ---
-    if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices') return json_(mainApi_(body));
+    if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices' || body.kind === 'main_link_check') return json_(mainApi_(body));
     if (body.kind === 'main_files' || body.kind === 'main_file_get') return json_(mainFiles_(body)); // v3.5 Windows software: full file mirror
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
@@ -199,7 +200,8 @@ function doPost(e) {
 
       case 'viber_setup': {
         // Viber Channel "Post API": the token comes from the channel's Settings › Developer tools. Kept only here.
-        const token = String(body.token || '').trim();
+        // v7: the Viber token comes as viberToken – "token" is the device's own pass (it was overwritten before).
+        const token = String(body.viberToken || '').trim();
         const current = PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN');
         // Replacing or removing a token needs the current one (so a lost tablet cannot take the alerts over).
         if (current && String(body.oldToken || '').trim() !== current) return json_({ ok: false, error: 'A Viber Channel is already connected. Enter its current token to replace or remove it.' });
@@ -288,6 +290,8 @@ function doPost(e) {
         return json_(mydayOut_(String(body.date || ''), body.items || [], String(body.calendar || '')));
 
       case 'viber':
+        // v7: a post can carry photos (invoice, cheque stub) and a PDF (purchase order). See viberFiles_.
+        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4)));
         return json_(viber_(String(body.text || '').slice(0, 7000)));
 
       default:
@@ -354,6 +358,53 @@ function viber_(text) {
   return { ok: true };
 }
 
+// v7: photos and PDFs in the Viber Channel. Viber can only take a file from a web link, so each file is saved in
+// Drive › Viber posts, made viewable by link just long enough for Viber to copy it, then made private again
+// (viberUnshare_ runs on every request and closes links older than 10 minutes). The text goes first.
+function viberFiles_(text, files) {
+  const t = viber_(text);
+  if (!t.ok || t.off) return t;
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('VIBER_TOKEN');
+  const from = props.getProperty('VIBER_FROM');
+  const folder = path_(['Viber posts', Utilities.formatDate(new Date(), 'Pacific/Fiji', 'yyyy-MM')]);
+  let shared = [];
+  try { shared = JSON.parse(props.getProperty('VIBER_SHARED') || '[]'); } catch (e) { shared = []; }
+  const errors = [];
+  files.forEach(function (f, i) {
+    try {
+      const mime = String(f.mime || 'image/jpeg');
+      const name = String(f.name || ('file-' + i)).replace(/[^A-Za-z0-9 ._-]+/g, '-').slice(0, 80);
+      const file = saveFile_(folder, name, String(f.data || ''), mime);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      shared.push({ id: file.getId(), at: Date.now() });
+      const isPic = /^image\/(jpeg|png)$/.test(mime);
+      const media = 'https://drive.google.com/uc?export=' + (isPic ? 'view' : 'download') + '&id=' + file.getId();
+      const msg = isPic ? { type: 'picture', text: String(f.caption || '').slice(0, 700), media: media }
+        : { type: 'file', media: media, size: file.getSize(), file_name: name };
+      const r = UrlFetchApp.fetch('https://chatapi.viber.com/pa/post', { method: 'post', contentType: 'application/json', headers: { 'X-Viber-Auth-Token': token },
+        payload: JSON.stringify(Object.assign({ from: from }, msg)), muteHttpExceptions: true });
+      let j = {};
+      try { j = JSON.parse(r.getContentText()); } catch (e) { j = { status: -1, status_message: r.getContentText().slice(0, 200) }; }
+      if (j.status !== 0) errors.push(name + ': ' + (j.status_message || 'not sent'));
+    } catch (e) { errors.push(String(e && e.message || e)); }
+  });
+  props.setProperty('VIBER_SHARED', JSON.stringify(shared.slice(-200)));
+  return errors.length ? { ok: true, partial: true, error: 'Viber: ' + errors.join('; ') } : { ok: true };
+}
+function viberUnshare_() {
+  const props = PropertiesService.getScriptProperties();
+  let shared = [];
+  try { shared = JSON.parse(props.getProperty('VIBER_SHARED') || '[]'); } catch (e) { return; }
+  if (!shared.length) return;
+  const keep = [];
+  shared.forEach(function (x) {
+    if (Date.now() - Number(x.at || 0) < 10 * 60000) { keep.push(x); return; }
+    try { DriveApp.getFileById(x.id).setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE); } catch (e) { /* gone already */ }
+  });
+  props.setProperty('VIBER_SHARED', JSON.stringify(keep));
+}
+
 function ocr_(blob) {
   const file = Drive.Files.create({ name: 'eb-ocr-temp', mimeType: 'application/vnd.google-apps.document' }, blob, { ocrLanguage: 'en' });
   try {
@@ -369,7 +420,7 @@ function ocr_(blob) {
 function doGet(e) {
   if (e && e.parameter && e.parameter.link) return linkPage_(String(e.parameter.link));
   return HtmlService.createTemplateFromFile('Dashboard').evaluate()
-    .setTitle('Easy Buys Bakery – Live Dashboard')
+    .setTitle('Easy Buys Business Dashboard')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
@@ -540,7 +591,7 @@ function push_(records, deviceId) {
     const newChanges = [];
     Object.keys(byTable).forEach(function (table) {
       const sh = sheet_('T_' + table, TABLE_HEADER);
-      const rows = values_(sh);
+      const rows = keysOf_(sh); // only key and time (the records themselves can be big: till figures)
       const index = {};
       rows.forEach(function (row, i) { index[String(row[0])] = { i: i + 2, updated: String(row[1]) }; });
       const appends = [];
@@ -572,6 +623,27 @@ function push_(records, deviceId) {
   });
 }
 
+// Key and time of every row (columns A–B only).
+function keysOf_(sh) {
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  return sh.getRange(2, 1, last - 1, 2).getValues().map(function (r) { return r.map(text_); });
+}
+// Some rows of a table: the few asked for one by one, or the whole table when most of it is wanted.
+function rowsAt_(sh, rowNos) {
+  const out = {};
+  const last = sh.getLastRow();
+  if (last < 2 || !rowNos.length) return out;
+  if (rowNos.length * 4 >= last) {
+    const all = values_(sh);
+    rowNos.forEach(function (n) { if (all[n - 2]) out[n] = all[n - 2]; });
+    return out;
+  }
+  rowNos.forEach(function (n) { if (n >= 2 && n <= last) out[n] = sh.getRange(n, 1, 1, TABLE_HEADER.length).getValues()[0].map(text_); });
+  return out;
+}
+const PULL_MAX_CHARS = 3500000; // one answer stays small enough for a tablet on a slow connection
+
 // Changes after `since`, made by other devices (the main software gets everything).
 function pull_(since, deviceId, forMain) {
   const changes = sheet_('Changes', CHANGES_HEADER);
@@ -580,23 +652,35 @@ function pull_(since, deviceId, forMain) {
   if (since >= total) return { ok: true, records: [], next: total, more: false };
   const count = Math.min(PULL_LIMIT, total - since);
   const list = changes.getRange(since + 2, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
-  const tables = {};
-  const out = [];
+  // which rows of which tables this page needs (only the latest version of a record in this page)
+  const want = [];
   const seen = {};
-  list.forEach(function (c) {
+  list.forEach(function (c, i) {
     const table = String(c[1]);
     if (!forMain && (table === 'audit_log' || String(c[4]) === String(deviceId))) return;
     const id = table + '|' + c[2];
-    if (seen[id]) return;   // only the latest version of a record in this batch
+    if (seen[id]) return;
     seen[id] = true;
-    if (!tables[table]) tables[table] = values_(sheet_('T_' + table, TABLE_HEADER));
-    const row = tables[table][Number(c[3]) - 2];
-    if (!row) return;
+    want.push({ i: i, table: table, rowNo: Number(c[3]) });
+  });
+  const byTable = {};
+  want.forEach(function (w) { (byTable[w.table] = byTable[w.table] || []).push(w.rowNo); });
+  const rows = {};
+  Object.keys(byTable).forEach(function (t) { rows[t] = rowsAt_(sheet_('T_' + t, TABLE_HEADER), byTable[t]); });
+  const out = [];
+  let size = 0;
+  let used = count;
+  for (let k = 0; k < want.length; k++) {
+    const w = want[k];
+    const row = rows[w.table][w.rowNo];
+    if (!row) continue;
+    if (size > PULL_MAX_CHARS && out.length) { used = w.i; break; } // the rest comes in the next page
+    size += String(row[4] || '').length;
     let parsed = {};
     try { parsed = JSON.parse(row[4]); } catch (e) { parsed = {}; }
-    out.push({ t: table, k: String(row[0]), u: String(row[1]), d: String(row[2]), row: parsed });
-  });
-  const next = since + count;
+    out.push({ t: w.table, k: String(row[0]), u: String(row[1]), d: String(row[2]), row: parsed });
+  }
+  const next = since + used;
   return { ok: true, records: out, next: next, more: next < total };
 }
 
@@ -828,7 +912,31 @@ function mainApi_(body) {
   PropertiesService.getScriptProperties().setProperty('LAST_MAIN_SYNC', now_());
   if (body.kind === 'main_pull') return pull_(Number(body.since) || 0, 'main', MAIN_TABLES_PULL_ALL);
   if (body.kind === 'main_push') return push_(body.records || [], 'main');
+  if (body.kind === 'main_link_check') return linkCheck_(body);
   return { ok: true, devices: devices_() };
+}
+
+// v3.9.4 the till program's test buttons: did the cloud keep its test, and has the main tablet answered it?
+// Only the two small test rows of that till are read (found by their key, not by reading the whole sheet).
+function linkCheck_(body) {
+  const src = String(body.source || '').replace(/[^A-Za-z0-9-]/g, '');
+  const out = { ok: true, version: SCRIPT_VERSION, ping: null, pong: null, devices: [] };
+  const sh = data_().getSheetByName('T_aronium_feed');
+  if (sh && src) {
+    ['ping', 'pong'].forEach(function (k) {
+      const key = src + '|' + k + '|ping|0';
+      let rowNo = 0;
+      try { const cell = sh.getRange('A:A').createTextFinder(key).matchEntireCell(true).findNext(); rowNo = cell ? cell.getRow() : 0; } catch (e) {
+        const keys = sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues() : [];
+        for (let i = 0; i < keys.length; i++) if (String(keys[i][0]) === key) { rowNo = i + 2; break; }
+      }
+      if (!rowNo) return;
+      try { out[k] = JSON.parse(JSON.parse(String(sh.getRange(rowNo, 5, 1, 1).getValues()[0][0] || '{}')).data || 'null'); } catch (e) { out[k] = null; }
+    });
+  }
+  out.devices = values_(sheet_('Devices', DEVICE_HEADER)).filter(function (r) { return String(r[3]) === 'active' && !/^(bridge-|first-device)/.test(String(r[0])); })
+    .map(function (r) { return { name: String(r[1]), last_seen: text_(r[6]) }; });
+  return out;
 }
 
 // Run once from the editor: creates the data spreadsheet and the main-software key.
