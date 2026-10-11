@@ -51,8 +51,10 @@ jobs:
         shell: pwsh
         run: |
           $env:EASYBUYS_LINK_HOME = "$env:RUNNER_TEMP\linkhome"
-          $p = Start-Process -FilePath dist\EasyBuysAroniumLink.exe -ArgumentList "--check" -Wait -PassThru
+          $p = Start-Process -FilePath dist\EasyBuysAroniumLink.exe -ArgumentList "--check" -PassThru
+          if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force; Write-Error "The program did not finish its check within 90 seconds"; exit 1 }
           Write-Host "check exit code: $($p.ExitCode) (1 = settings not filled in yet, which is expected here)"
+          if (Test-Path "$env:EASYBUYS_LINK_HOME\crash.log") { Get-Content "$env:EASYBUYS_LINK_HOME\crash.log"; Write-Error "The program crashed"; exit 1 }
           if ($p.ExitCode -gt 1) { Write-Error "The program did not start properly"; exit 1 }
 
       - name: Package and publish
