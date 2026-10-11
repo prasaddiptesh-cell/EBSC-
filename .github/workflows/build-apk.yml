@@ -58,7 +58,15 @@ jobs:
       - name: Run the checks (upgrade from Bakery, Time Clock, timesheets, leave, sync, device linking, cloud)
         run: |
           if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
-            npm test
+            # Any failing check is also shown as an annotation on the build (readable without the full log).
+            set +e
+            npm test 2>&1 | tee test-output.log
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -ne 0 ]; then
+              grep -nE "^FAIL|FAILED|Error|Assertion|at file" test-output.log | head -40 | while IFS= read -r line; do echo "::error::$line"; done
+              exit "$status"
+            fi
           else
             echo "No npm test script found in package.json; skipping automated tests."
           fi
