@@ -1,0 +1,64 @@
+test_a_big_aronium (test_chaos.Chaos.test_a_big_aronium)
+A busy till after a year: 3 000 products, 120 000 receipt lines. Sent in limited pieces, in reasonable time. ... ok
+test_aronium_is_never_changed_even_when_things_fail (test_chaos.Chaos.test_aronium_is_never_changed_even_when_things_fail) ... ok
+test_aronium_locked_by_a_long_write (test_chaos.Chaos.test_aronium_locked_by_a_long_write)
+Aronium holding its database (saving a big sale): the link waits or tries again later, never crashes. ... ok
+test_cannot_write_its_own_files (test_chaos.Chaos.test_cannot_write_its_own_files) ... ok
+test_cloud_has_newer_copy (test_chaos.Chaos.test_cloud_has_newer_copy)
+The cloud refusing a record (it already has a newer one) must not make the PC send it for ever. ... ok
+test_cloud_trouble_is_explained (test_chaos.Chaos.test_cloud_trouble_is_explained) ... ok
+test_connection_drops_half_way (test_chaos.Chaos.test_connection_drops_half_way) ... ok
+test_damaged_database (test_chaos.Chaos.test_damaged_database) ... ok
+test_damaged_memory_of_what_was_sent (test_chaos.Chaos.test_damaged_memory_of_what_was_sent) ... ok
+test_damaged_settings_file (test_chaos.Chaos.test_damaged_settings_file) ... ok
+test_database_missing (test_chaos.Chaos.test_database_missing) ... ok
+test_database_path_with_spaces_and_unicode (test_chaos.Chaos.test_database_path_with_spaces_and_unicode) ... ok
+test_empty_aronium (test_chaos.Chaos.test_empty_aronium) ... ok
+test_internet_down_then_back_catches_up_once (test_chaos.Chaos.test_internet_down_then_back_catches_up_once) ... ok
+test_memory_file_deleted (test_chaos.Chaos.test_memory_file_deleted) ... ok
+test_not_a_database (test_chaos.Chaos.test_not_a_database) ... ok
+test_odd_values_in_aronium (test_chaos.Chaos.test_odd_values_in_aronium) ... ok
+test_older_aronium_without_optional_tables_and_columns (test_chaos.Chaos.test_older_aronium_without_optional_tables_and_columns) ... ok
+test_pc_clock_put_back (test_chaos.Chaos.test_pc_clock_put_back) ... ok
+test_sales_being_saved_while_it_reads (test_chaos.Chaos.test_sales_being_saved_while_it_reads)
+Aronium keeps selling during every run: nothing breaks, and the final figures match Aronium exactly. ... ok
+test_two_runs_at_once (test_chaos.Chaos.test_two_runs_at_once) ... ok
+test_watcher_survives_every_problem_and_stops_when_asked (test_chaos.Chaos.test_watcher_survives_every_problem_and_stops_when_asked) ... ok
+test_wrong_sqlite_file (test_chaos.Chaos.test_wrong_sqlite_file) ... ok
+test_run_and_check (test_link.BridgeTests.test_run_and_check) ... ok
+test_run_never_raises (test_link.BridgeTests.test_run_never_raises) ... ok
+test_status_says_what_is_waiting (test_link.BridgeTests.test_status_says_what_is_waiting) ... ok
+test_task_xml (test_link.BridgeTests.test_task_xml) ... ok
+test_test_app_answer_and_no_answer (test_link.BridgeTests.test_test_app_answer_and_no_answer) ... ok
+test_test_cloud (test_link.BridgeTests.test_test_cloud) ... ok
+test_watch_runs_and_stops_when_switched_off (test_link.BridgeTests.test_watch_runs_and_stops_when_switched_off) ... ok
+test_watch_sends_after_a_change_and_every_15_minutes (test_link.BridgeTests.test_watch_sends_after_a_change_and_every_15_minutes) ... ok
+test_damaged_settings (test_link.ConfigTests.test_damaged_settings) ... ok
+test_problems (test_link.ConfigTests.test_problems) ... ok
+test_save_load (test_link.ConfigTests.test_save_load) ... ok
+test_big_lists_are_cut_into_parts (test_link.FeedTests.test_big_lists_are_cut_into_parts) ... ok
+test_clock_put_back_still_newest (test_link.FeedTests.test_clock_put_back_still_newest) ... ok
+test_first_send_and_nothing_twice (test_link.FeedTests.test_first_send_and_nothing_twice) ... ok
+test_new_sale_sends_only_that_day (test_link.FeedTests.test_new_sale_sends_only_that_day) ... ok
+test_no_internet_keeps_everything (test_link.FeedTests.test_no_internet_keeps_everything) ... ok
+test_refused_records_do_not_loop (test_link.FeedTests.test_refused_records_do_not_loop) ... ok
+test_shorter_list_empties_old_parts (test_link.FeedTests.test_shorter_list_empties_old_parts) ... ok
+test_today_is_sent_at_most_hourly (test_link.FeedTests.test_today_is_sent_at_most_hourly) ... ok
+test_wrong_key (test_link.FeedTests.test_wrong_key) ... ok
+test_credit_purchases_parties (test_link.ReaderTests.test_credit_purchases_parties) ... ok
+test_day_activity (test_link.ReaderTests.test_day_activity) ... ok
+test_end_of_day (test_link.ReaderTests.test_end_of_day) ... ok
+test_never_changes_aronium (test_link.ReaderTests.test_never_changes_aronium) ... ok
+test_not_an_aronium_file (test_link.ReaderTests.test_not_an_aronium_file) ... ok
+test_older_aronium_without_some_tables (test_link.ReaderTests.test_older_aronium_without_some_tables) ... ok
+test_oldest_and_since (test_link.ReaderTests.test_oldest_and_since) ... ok
+test_products (test_link.ReaderTests.test_products) ... ok
+test_sales_day (test_link.ReaderTests.test_sales_day) ... ok
+test_writing_is_impossible (test_link.ReaderTests.test_writing_is_impossible) ... ok
+
+----------------------------------------------------------------------
+Ran 53 tests in 123.203s
+
+OK
+
+  big Aronium: first send 64.3s in 1 round(s), 765 records, 64 uploads; quiet run 0.5s

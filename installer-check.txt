@@ -1,0 +1,27 @@
+**********************
+PowerShell transcript start
+Start time: 20261012011046
+Username: runnervmfi6oq\runneradmin
+RunAs User: runnervmfi6oq\runneradmin
+Configuration Name: 
+Machine: runnervmfi6oq (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -command . 'D:\a\_temp\a2aca1cc-0273-40a5-831f-d0e4ce865404.ps1'
+Process ID: 9648
+PSVersion: 7.6.6
+PSEdition: Core
+GitCommitId: 7.6.6
+OS: Microsoft Windows 10.0.26100
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Apps list: Easy Buys Aronium Link 1.2.15 by Easy Buys Shopping Centre
+install, update and uninstall all fine
+PS>$global:?
+True
+**********************
+PowerShell transcript end
+End time: 20261012011100
+**********************
