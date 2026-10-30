@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 8;                 // v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 9;                 // v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -204,15 +204,17 @@ function doPost(e) {
         // Viber Channel "Post API": the token comes from the channel's Settings › Developer tools. Kept only here.
         // v7: the Viber token comes as viberToken – "token" is the device's own pass (it was overwritten before).
         const token = String(body.viberToken || '').trim();
-        const current = PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN');
+        // v9: a shop's own channel (shopCode) or the main channel.
+        const sfx = viberSuffix_(body.shopCode);
+        const current = PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN' + sfx);
         // Replacing or removing a token needs the current one (so a lost tablet cannot take the alerts over).
         if (current && String(body.oldToken || '').trim() !== current) return json_({ ok: false, error: 'A Viber Channel is already connected. Enter its current token to replace or remove it.' });
-        if (!token) { PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN'); return json_({ ok: true, message: 'Viber Channel disconnected.' }); }
-        PropertiesService.getScriptProperties().setProperty('VIBER_TOKEN', token);
-        PropertiesService.getScriptProperties().deleteProperty('VIBER_FROM');
+        if (!token) { PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN' + sfx); PropertiesService.getScriptProperties().deleteProperty('VIBER_FROM' + sfx); return json_({ ok: true, message: 'Viber Channel disconnected.' }); }
+        PropertiesService.getScriptProperties().setProperty('VIBER_TOKEN' + sfx, token);
+        PropertiesService.getScriptProperties().deleteProperty('VIBER_FROM' + sfx);
         if (/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(body.selfUrl || ''))) PropertiesService.getScriptProperties().setProperty('VIBER_HOOK_URL', String(body.selfUrl));
-        const t = viber_('Easy Buys alerts are connected to this channel.');
-        if (!t.ok) PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN');
+        const t = viber_(sfx ? 'Easy Buys alerts for shop ' + sfx.slice(1) + ' are connected to this channel.' : 'Easy Buys alerts are connected to this channel.', body.shopCode);
+        if (!t.ok) PropertiesService.getScriptProperties().deleteProperty('VIBER_TOKEN' + sfx);
         return json_(t.ok ? { ok: true, message: 'Connected – a test message was sent to the channel.' } : t);
       }
 
@@ -294,8 +296,8 @@ function doPost(e) {
 
       case 'viber':
         // v7: a post can carry photos (invoice, cheque stub) and a PDF (purchase order). See viberFiles_.
-        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4)));
-        return json_(viber_(String(body.text || '').slice(0, 7000)));
+        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4), body.shopCode));
+        return json_(viber_(String(body.text || '').slice(0, 7000), body.shopCode));
 
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
@@ -337,24 +339,35 @@ function staffEmail_(addr) {
   return values_(sh).some(function (r) { try { return String(JSON.parse(r[4] || '{}').email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
 }
 
+// v9: which channel – '_S1' for a shop that has its own channel, '' for the main one.
+function viberSuffix_(shopCode) {
+  const c = String(shopCode || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+  return c ? '_' + c : '';
+}
+function viberKey_(shopCode) {
+  const sfx = viberSuffix_(shopCode);
+  return sfx && PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN' + sfx) ? sfx : '';
+}
 // Send a text to the Viber Channel (Channels Post API). The sender must be the channel's super admin.
-function viber_(text) {
+// v9: a shop's message goes to that shop's channel when it has one, otherwise to the main channel.
+function viber_(text, shopCode) {
   const props = PropertiesService.getScriptProperties();
-  const token = props.getProperty('VIBER_TOKEN');
+  const sfx = viberKey_(shopCode);
+  const token = props.getProperty('VIBER_TOKEN' + sfx);
   if (!token) return { ok: true, off: true };
   const call = function (path, payload) {
     const r = UrlFetchApp.fetch('https://chatapi.viber.com/pa/' + path, { method: 'post', contentType: 'application/json', headers: { 'X-Viber-Auth-Token': token },
       payload: JSON.stringify(payload || {}), muteHttpExceptions: true });
     try { return JSON.parse(r.getContentText()); } catch (e) { return { status: -1, status_message: r.getContentText().slice(0, 200) }; }
   };
-  let from = props.getProperty('VIBER_FROM');
+  let from = props.getProperty('VIBER_FROM' + sfx);
   if (!from) {
     const info = call('get_account_info', {});
     if (info.status !== 0) return { ok: false, error: 'Viber: ' + (info.status_message || 'token not accepted') };
     const admin = (info.members || []).filter(function (m) { return m.role === 'superadmin'; })[0] || (info.members || [])[0];
     if (!admin) return { ok: false, error: 'Viber: the channel has no admin member.' };
     from = admin.id;
-    props.setProperty('VIBER_FROM', from);
+    props.setProperty('VIBER_FROM' + sfx, from);
   }
   let r = call('post', { from: from, type: 'text', text: text });
   if (r.status !== 0 && /webhook/i.test(String(r.status_message || ''))) {
@@ -362,7 +375,7 @@ function viber_(text) {
     if (!h.ok) return h;
     r = call('post', { from: from, type: 'text', text: text });
   }
-  if (r.status !== 0) { props.deleteProperty('VIBER_FROM'); return { ok: false, error: 'Viber: ' + (r.status_message || 'not sent') }; }
+  if (r.status !== 0) { props.deleteProperty('VIBER_FROM' + sfx); return { ok: false, error: 'Viber: ' + (r.status_message || 'not sent') }; }
   return { ok: true };
 }
 // A Viber Channel only takes posts once it has a webhook: this cloud's own web address (Viber checks it answers).
@@ -381,12 +394,13 @@ function viberWebhook_(call) {
 // v7: photos and PDFs in the Viber Channel. Viber can only take a file from a web link, so each file is saved in
 // Drive › Viber posts, made viewable by link just long enough for Viber to copy it, then made private again
 // (viberUnshare_ runs on every request and closes links older than 10 minutes). The text goes first.
-function viberFiles_(text, files) {
-  const t = viber_(text);
+function viberFiles_(text, files, shopCode) {
+  const t = viber_(text, shopCode);
   if (!t.ok || t.off) return t;
   const props = PropertiesService.getScriptProperties();
-  const token = props.getProperty('VIBER_TOKEN');
-  const from = props.getProperty('VIBER_FROM');
+  const sfx = viberKey_(shopCode);
+  const token = props.getProperty('VIBER_TOKEN' + sfx);
+  const from = props.getProperty('VIBER_FROM' + sfx);
   const folder = path_(['Viber posts', Utilities.formatDate(new Date(), 'Pacific/Fiji', 'yyyy-MM')]);
   let shared = [];
   try { shared = JSON.parse(props.getProperty('VIBER_SHARED') || '[]'); } catch (e) { shared = []; }
