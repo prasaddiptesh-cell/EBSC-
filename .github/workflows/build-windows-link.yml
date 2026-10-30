@@ -108,6 +108,7 @@ jobs:
           # the automatic update task (runs as the system, every 2 hours and at start-up)
           schtasks /Query /TN "Easy Buys Aronium Link Update" /V /FO LIST
           if ($LASTEXITCODE -ne 0) { Write-Error "the automatic update task was not set up"; exit 1 }
+          Write-Host "update task: set up (runs as the system)"
           # install again over the top (an update)
           $p = Start-Process -FilePath output\EasyBuysAroniumLink-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
           if ($p.ExitCode -ne 0) { Write-Error "update install exit code $($p.ExitCode)"; exit 1 }
@@ -117,7 +118,9 @@ jobs:
           if (Test-Path $exe) { Write-Error "uninstall left the program behind"; exit 1 }
           schtasks /Query /TN "Easy Buys Aronium Link Update" 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Error "uninstall left the update task behind"; exit 1 }
+          Write-Host "update task: removed by the uninstall"
           Write-Host "install, update and uninstall all fine"
+          exit 0
 
       - name: Package and publish
         working-directory: link
