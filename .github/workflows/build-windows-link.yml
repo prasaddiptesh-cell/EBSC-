@@ -83,7 +83,8 @@ jobs:
           $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $iscc) { Write-Error "Inno Setup not found"; exit 1 }
           $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
-          & $iscc.FullName "/DAppVersion=$ver" "/DBuild=${{ github.run_number }}" installer.iss
+          $shown = (python -c "import build_info; print(build_info.shown_build())").Trim()
+          & $iscc.FullName "/DAppVersion=$ver" "/DBuild=$shown" installer.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-Item output\EasyBuysAroniumLink-Setup.exe
 
@@ -104,6 +105,9 @@ jobs:
           $c = Start-Process -FilePath $exe -ArgumentList '--check' -PassThru
           if (-not $c.WaitForExit(90000)) { Write-Error "installed copy did not finish its check"; exit 1 }
           if ($c.ExitCode -gt 1) { Write-Error "installed copy did not start properly"; exit 1 }
+          # the automatic update task (runs as the system, every 2 hours and at start-up)
+          schtasks /Query /TN "Easy Buys Aronium Link Update" /V /FO LIST
+          if ($LASTEXITCODE -ne 0) { Write-Error "the automatic update task was not set up"; exit 1 }
           # install again over the top (an update)
           $p = Start-Process -FilePath output\EasyBuysAroniumLink-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
           if ($p.ExitCode -ne 0) { Write-Error "update install exit code $($p.ExitCode)"; exit 1 }
@@ -111,6 +115,8 @@ jobs:
           $u = Start-Process -FilePath $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
           Start-Sleep -Seconds 5
           if (Test-Path $exe) { Write-Error "uninstall left the program behind"; exit 1 }
+          schtasks /Query /TN "Easy Buys Aronium Link Update" 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Error "uninstall left the update task behind"; exit 1 }
           Write-Host "install, update and uninstall all fine"
 
       - name: Package and publish
@@ -126,7 +132,13 @@ jobs:
           gh release delete link-latest --yes --cleanup-tag 2>$null
           $ver = (python -c "import build_info; print(build_info.VERSION)").Trim()
           Copy-Item output\EasyBuysAroniumLink-Setup.exe .
-          gh release create link-latest EasyBuysAroniumLink-Setup.exe EasyBuysAroniumLink-Windows.zip --title "Aronium Link for Windows (till PCs) - version $ver build ${{ github.run_number }}" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
+          # what the till PCs read to update themselves: build, version, size and fingerprint of the installer
+          $f = Get-Item EasyBuysAroniumLink-Setup.exe
+          $sha = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
+          $info = @{ build = [int]"${{ github.run_number }}"; version = $ver; size = $f.Length; sha256 = $sha; commit = "${{ github.sha }}" } | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText("$PWD\link-version.json", $info)
+          Get-Content link-version.json
+          gh release create link-latest EasyBuysAroniumLink-Setup.exe EasyBuysAroniumLink-Windows.zip link-version.json --title "Aronium Link for Windows (till PCs) - version $ver build $((python -c 'import build_info; print(build_info.shown_build())').Trim())" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
 
       - name: Keep the picture and test output (branch link-preview)
         if: always()
