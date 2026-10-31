@@ -1347,7 +1347,14 @@ function mainFiles_(body) {
 // The owner's own free key from aistudio.google.com is kept in Project settings › Script properties › GEMINI_KEY
 // (never in this file – the code is public). The app sends the pages (photos as JPEG, or a PDF) and hints (the
 // suppliers it knows); the answer is JSON in the shape below. Every figure is still checked by a person in the app.
-const AI_MODEL = 'gemini-2.5-flash';
+// Models tried in turn: GEMINI_MODEL in Script properties (if set), then these. When Google retires a model, or one
+// model's free limit is used up, the next one is tried – nothing to change in this file.
+const AI_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+const AI_MODEL = AI_MODELS[0];
+function aiModels_() {
+  const own = String(PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || '').trim().replace(/^models\//, '');
+  return (own ? [own] : []).concat(AI_MODELS.filter(function (m) { return m !== own; }));
+}
 const AI_MAX_BYTES = 19 * 1024 * 1024;   // Gemini takes about 20 MB of pages in one request
 function aiInvoiceSchema_() {
   const n = function (d) { return { type: 'NUMBER', nullable: true, description: d }; };
@@ -1422,33 +1429,40 @@ function aiReadInvoice_(files, hints) {
     });
     if (parts.length < 2) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: no pages were sent.' };
     if (bytes > AI_MAX_BYTES) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the pages are too big for one reading (about 13 MB at most).' };
-    const payload = JSON.stringify({
-      contents: [{ role: 'user', parts: parts }],
-      generationConfig: {
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: aiInvoiceSchema_(),
-        thinkingConfig: { thinkingBudget: 0 },   // quick answer: a fetch from Apps Script may take about 60 seconds at most
-      },
-    });
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + AI_MODEL + ':generateContent?key=' + encodeURIComponent(key);
-    let res = null;
-    let code = 0;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: payload, muteHttpExceptions: true });
-      code = res.getResponseCode();
-      // busy or a short limit: one more try, only when there is time left (Apps Script stops a request at 6 minutes)
-      if ((code === 429 || code === 500 || code === 503) && attempt === 0 && Date.now() - started < 60000) { Utilities.sleep(3000); continue; }
-      break;
+    const body = function (model, think) {
+      const gc = { temperature: 0, responseMimeType: 'application/json', responseSchema: aiInvoiceSchema_() };
+      // quick answer: a fetch from Apps Script may take about 60 seconds at most
+      if (think && /^gemini-2\./.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
+      return JSON.stringify({ contents: [{ role: 'user', parts: parts }], generationConfig: gc });
+    };
+    let res = null; let code = 0; let json = null; let used = ''; let lastWhy = '';
+    const models = aiModels_();
+    for (let i = 0; i < models.length; i++) {
+      const model = models[i];
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key);
+      let think = true;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: body(model, think), muteHttpExceptions: true });
+        code = res.getResponseCode();
+        try { json = JSON.parse(res.getContentText()); } catch (e) { json = null; }
+        const why0 = json && json.error && json.error.message ? String(json.error.message) : '';
+        // a model that does not take the "quick answer" setting: once more without it
+        if (code === 400 && think && /thinking/i.test(why0)) { think = false; continue; }
+        // busy: one more try, only when there is time left (Apps Script stops a request at 6 minutes)
+        if ((code === 500 || code === 503) && attempt === 0 && Date.now() - started < 60000) { Utilities.sleep(3000); continue; }
+        break;
+      }
+      used = model;
+      if (code === 200) break;
+      lastWhy = json && json.error && json.error.message ? json.error.message : ('HTTP ' + code);
+      if (code === 400 && /api key/i.test(lastWhy)) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the GEMINI_KEY in Script properties was not accepted – make a new key at aistudio.google.com.' };
+      // retired / unknown model, or this model's free limit used up: the next model
+      const nextOk = code === 404 || code === 429 || /no longer available|not found|not supported|deprecated|retired/i.test(lastWhy);
+      if (!nextOk || Date.now() - started > 150000) break;
     }
-    const text = res.getContentText();
-    let json = null;
-    try { json = JSON.parse(text); } catch (e) { json = null; }
     if (code !== 200) {
-      const why = json && json.error && json.error.message ? json.error.message : ('HTTP ' + code);
-      if (code === 400 && /api key/i.test(why)) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the GEMINI_KEY in Script properties was not accepted – make a new key at aistudio.google.com.' };
       if (code === 429) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the free AI limit is used up for now – try again later.' };
-      return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(why, key) };
+      return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(lastWhy, key) };
     }
     const cand = json && json.candidates && json.candidates[0];
     if (!cand) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: no answer' + (json && json.promptFeedback && json.promptFeedback.blockReason ? ' (' + json.promptFeedback.blockReason + ')' : '') + '.' };
@@ -1458,7 +1472,7 @@ function aiReadInvoice_(files, hints) {
       return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the answer was not complete' + (cand.finishReason ? ' (' + cand.finishReason + ')' : '') + '.' };
     }
     if (!invoice || typeof invoice !== 'object') return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the answer was empty.' };
-    return { ok: true, invoice: invoice, model: AI_MODEL, ms: Date.now() - started };
+    return { ok: true, invoice: invoice, model: used, ms: Date.now() - started };
   } catch (e) {
     // a timeout or no connection from Google's side: the app reads it on the phone instead
     return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(e && e.message ? e.message : e, key) };
