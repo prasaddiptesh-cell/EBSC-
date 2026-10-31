@@ -88,6 +88,10 @@ jobs:
         run: npx expo export --platform android --output-dir /tmp/check 2>&1 | tail -40; exit ${PIPESTATUS[0]}
 
       - name: Build the apk
+        env:
+          EB_KEYSTORE_B64: ${{ secrets.EB_KEYSTORE_B64 }}
+          EB_KEYSTORE_PASS: ${{ secrets.EB_KEYSTORE_PASS }}
+          EB_KEY_ALIAS: ${{ secrets.EB_KEY_ALIAS }}
         run: |
           CI=1 npx expo prebuild --platform android --clean --no-install
           # Make sure the face engine is inside the app (copy it again if the build step missed it).
@@ -106,7 +110,22 @@ jobs:
           # Smaller app: one apk per kind of processor instead of one big apk with all of them (and no emulator code).
           # The normal apk is for 64-bit tablets and phones; the "-32bit" one is only for older devices that cannot install it.
           printf '\nandroid {\n  splits {\n    abi {\n      enable true\n      reset()\n      include "arm64-v8a", "armeabi-v7a"\n      universalApk false\n    }\n  }\n}\n' >> android/app/build.gradle
+          # The shop's own signing key (GitHub › Settings › Secrets › Actions: EB_KEYSTORE_B64, EB_KEYSTORE_PASS, EB_KEY_ALIAS).
+          # Without it the app is signed with the public test key – anyone could build an app that installs over it.
+          if [ -n "$EB_KEYSTORE_B64" ] && [ -n "$EB_KEYSTORE_PASS" ]; then
+            echo "$EB_KEYSTORE_B64" | base64 -d > android/app/easybuys-release.jks
+            printf '\nandroid {\n  signingConfigs {\n    easybuys {\n      storeFile file("easybuys-release.jks")\n      storePassword System.getenv("EB_KEYSTORE_PASS")\n      keyAlias (System.getenv("EB_KEY_ALIAS") ?: "easybuys")\n      keyPassword System.getenv("EB_KEYSTORE_PASS")\n    }\n  }\n  buildTypes { release { signingConfig signingConfigs.easybuys } }\n}\n' >> android/app/build.gradle
+            echo "SIGNED=shop" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The shop's signing key is not set up yet (GitHub secrets EB_KEYSTORE_B64 / EB_KEYSTORE_PASS) – this app is signed with the public test key."
+            echo "SIGNED=test" >> "$GITHUB_ENV"
+          fi
           cd android && chmod +x gradlew && ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
+          rm -f app/easybuys-release.jks
+          # check which key signed it
+          APKS=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          if [ -x "$APKS" ]; then "$APKS" verify --print-certs app/build/outputs/apk/release/app-arm64-v8a-release.apk | grep -i "SHA-256" | head -1 | tee /tmp/cert.txt; fi
+          if [ "$SIGNED" = "shop" ] && ! grep -qi "e2f8066179d9a6457a5746f8966338f47ab9d3f0c7fd3861e70119d323b39341" /tmp/cert.txt; then echo "::error::The app is not signed with the shop's key"; exit 1; fi
 
       - name: Publish the apk
         env:
@@ -121,7 +140,7 @@ jobs:
           cp android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "../$NAME32"
           cd ..
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}."
+          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}. Signed with: ${SIGNED:-test} key."
 
       - name: Keep a copy for 30 days
         uses: actions/upload-artifact@v4

@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 9;                 // v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 10;                // 1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -145,17 +145,31 @@ function doPost(e) {
 
       case 'photo': {
         const folder = path_(['Photos', body.month || 'Other', body.refType || 'other']);
-        const f = saveFile_(folder, body.fileName, body.data, MimeType.JPEG);
+        const f = saveFile_(folder, body.fileName, body.data, body.mime === 'application/pdf' ? MimeType.PDF : MimeType.JPEG);
         return json_({ ok: true, url: f.getUrl() });
       }
 
       case 'ocr': {
         // Read the text of invoice photos with Google's free OCR (needs Services › Drive API added once).
+        // 1.0.0 each page on its own: one bad page no longer fails the others (its problem is sent back in pageErrors).
         if (typeof Drive === 'undefined' || !Drive.Files) return json_({ ok: true, off: true });
-        const texts = (body.files || []).slice(0, 6).map(function (f, i) {
-          return ocr_(Utilities.newBlob(Utilities.base64Decode(f.data), f.mimeType || 'image/jpeg', 'page-' + (i + 1) + '.jpg'));
+        const texts = [];
+        const pageErrors = [];
+        (body.files || []).slice(0, 6).forEach(function (f, i) {
+          try {
+            const t = ocr_(Utilities.newBlob(Utilities.base64Decode(f.data), f.mimeType || 'image/jpeg', 'page-' + (i + 1) + '.jpg'));
+            if (t) texts.push(t); else pageErrors.push('Page ' + (i + 1) + ': no text found');
+          } catch (err) {
+            pageErrors.push('Page ' + (i + 1) + ': ' + String(err && err.message ? err.message : err).slice(0, 200));
+          }
         });
-        return json_({ ok: true, text: texts.join('\n') });
+        return json_({ ok: true, text: texts.join('\n'), pageErrors: pageErrors });
+      }
+
+      case 'invoice_ai': {
+        // 1.0.0 an invoice (photos or a PDF) read by Google Gemini with the owner's own free key (Script properties ›
+        // GEMINI_KEY). Answers { ok, invoice: {…}, model } or { ok: false, code: 'NO_AI_KEY' | 'AI_ERROR', error }.
+        return json_(aiReadInvoice_(body.files || [], body.hints || {}));
       }
 
       case 'file_put': {
@@ -502,9 +516,27 @@ function linkUrl_(url, linkCode) {
   return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'link=' + encodeURIComponent(linkCode);
 }
 
+// The dashboard password: the sample one is refused (anyone can read it in the public code), and after 10 wrong
+// passwords the dashboard stays shut for an hour. Returns null when the password is right, or the answer to send back.
+const DASH_MAX_FAILS = 10;
+function dashCheck_(password) {
+  if (!DASHBOARD_PASSWORD || DASHBOARD_PASSWORD === 'choose-a-dashboard-password' || String(DASHBOARD_PASSWORD).length < 6) {
+    return { ok: false, error: 'The dashboard password has not been set in the cloud program yet (step 2 at the top).' };
+  }
+  const cache = CacheService.getScriptCache();
+  const fails = Number(cache.get('dash_fails') || '0');
+  if (fails >= DASH_MAX_FAILS) return { ok: false, error: 'Too many wrong passwords. The dashboard is locked for an hour.' };
+  if (String(password || '') !== DASHBOARD_PASSWORD) {
+    cache.put('dash_fails', String(fails + 1), 3600);
+    return { ok: false, error: 'Wrong password' };
+  }
+  return null;
+}
+
 // Called by the dashboard page every 30 seconds.
 function getDashboard(password) {
-  if (!DASHBOARD_PASSWORD || password !== DASHBOARD_PASSWORD) return { ok: false, error: 'Wrong password' };
+  const bad = dashCheck_(password);
+  if (bad) return bad;
   const props = PropertiesService.getScriptProperties();
   let snap = null;
   const fileId = props.getProperty('SNAPSHOT_FILE');
@@ -525,7 +557,8 @@ function planEdits_() {
 // Called by the dashboard when "Save plan" is pressed.
 // items: { productId: quantity }  (0 or empty = not planned)
 function savePlanOnline(password, date, items, byName) {
-  if (!DASHBOARD_PASSWORD || password !== DASHBOARD_PASSWORD) return { ok: false, error: 'Wrong password' };
+  const bad = dashCheck_(password);
+  if (bad) return bad;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return { ok: false, error: 'Invalid date' };
   const clean = {};
   Object.keys(items || {}).forEach(function (k) {
@@ -1308,4 +1341,126 @@ function mainFiles_(body) {
   const page = files.slice(0, limit);
   PropertiesService.getScriptProperties().setProperty('LAST_MAIN_SYNC', now_());
   return { ok: true, files: page, next: page.length ? page[page.length - 1].at : since, more: files.length > limit };
+}
+
+// ================================================================ 1.0.0 invoices read by AI (Google Gemini)
+// The owner's own free key from aistudio.google.com is kept in Project settings › Script properties › GEMINI_KEY
+// (never in this file – the code is public). The app sends the pages (photos as JPEG, or a PDF) and hints (the
+// suppliers it knows); the answer is JSON in the shape below. Every figure is still checked by a person in the app.
+const AI_MODEL = 'gemini-2.5-flash';
+const AI_MAX_BYTES = 19 * 1024 * 1024;   // Gemini takes about 20 MB of pages in one request
+function aiInvoiceSchema_() {
+  const n = function (d) { return { type: 'NUMBER', nullable: true, description: d }; };
+  const s = function (d) { return { type: 'STRING', nullable: true, description: d }; };
+  return {
+    type: 'OBJECT',
+    properties: {
+      supplier: s('The company that SOLD the goods and issued the invoice (never Easy Buys, the buyer)'),
+      supplier_tin: s("The supplier's TIN / VAT number, digits only (never 50-14315-0-7, Easy Buys' own)"),
+      invoice_no: s("The supplier's invoice number (not the order number, account number or the VMS / SDC fiscal number)"),
+      invoice_date: s('The invoice date as YYYY-MM-DD (Fiji writes dates day/month/year)'),
+      prices_incl_vat: { type: 'BOOLEAN', nullable: true, description: 'true if the unit prices and line amounts printed include VAT (VIP), false if they are before VAT (VEP)' },
+      subtotal_excl: n('Total before VAT (VEP)'),
+      vat: n('Total VAT (also called GST or Tax) in dollars – not a percentage'),
+      total_incl: n('The total to pay including VAT (VIP / Invoice Total / Total Incl. VAT)'),
+      lines: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            code: s("The supplier's item code"),
+            description: { type: 'STRING', description: 'The product name as printed' },
+            qty: n('Quantity'),
+            unit: s('Unit: Each, Carton, Bag, Outer, Pkt, Kg …'),
+            unit_price: n('Price of one unit as printed'),
+            disc_pct: n('Discount percent on the line, if any'),
+            vat_pct: n('VAT percent of the line: 12.5 standard, 0 zero rated or exempt'),
+            line_total: n('Line amount BEFORE VAT if the invoice shows it, otherwise as printed'),
+          },
+          required: ['description'],
+        },
+      },
+      notes: s('Anything unclear: handwriting, a page cut off, totals that do not add up, more than one invoice'),
+      confidence: n('How sure you are of the figures, 0 to 1'),
+    },
+    required: ['lines'],
+  };
+}
+function aiPrompt_(hints) {
+  const h = hints || {};
+  const known = (Array.isArray(h.suppliers) ? h.suppliers : []).map(function (x) { return String(x || '').replace(/[\r\n]+/g, ' ').slice(0, 80); }).filter(String).slice(0, 200);
+  const vat = Number(h.vatPct) > 0 && Number(h.vatPct) < 50 ? Number(h.vatPct) : 12.5;
+  return [
+    'You read supplier invoices for a grocery business in Fiji (currency FJD). The pages are one invoice (sometimes a delivery note or receipt with it).',
+    'The BUYER is Easy Buys Shopping Centre (also written Easy Buys Shopping Center, Easy Buy, EBSC), TIN 50-14315-0-7, 29 Drasa Avenue / Tukani Street, Lautoka. The buyer is NEVER the supplier: the supplier is the company whose name, logo, TIN and phone are at the top of the invoice.',
+    'Fiji VAT is ' + vat + '% (standard); some lines are zero rated (VAT 0). VEP = value excluding VAT, VIP = value including VAT. The VAT is an amount in dollars, never the percentage.',
+    'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Read every item line, in order, across all pages; do not invent lines. Do not take the SDC / VMS fiscal invoice number as the invoice number.',
+    'Give numbers as plain numbers (no $ or commas). Use null for anything not on the invoice.',
+    known.length ? 'Known suppliers (use the exact name when it is one of these): ' + known.join('; ') + '.' : '',
+  ].filter(String).join('\n');
+}
+function aiScrub_(msg, key) {
+  let m = String(msg || '');
+  if (key) m = m.split(key).join('***');
+  return m.replace(/key=[A-Za-z0-9_\-]+/g, 'key=***').slice(0, 300);
+}
+// files: [{ mimeType, data (base64) }] (at most 6), hints: { suppliers: [names], vatPct }
+// → { ok: true, invoice, model } | { ok: false, code: 'NO_AI_KEY' | 'AI_ERROR', error }
+function aiReadInvoice_(files, hints) {
+  const key = String(PropertiesService.getScriptProperties().getProperty('GEMINI_KEY') || '').trim();
+  if (!key) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the AI reader is not switched on – add GEMINI_KEY in Project settings › Script properties.' };
+  const started = Date.now();
+  try {
+    const parts = [{ text: aiPrompt_(hints) }];
+    let bytes = 0;
+    (files || []).slice(0, 6).forEach(function (f) {
+      const mime = /pdf/i.test(String(f && f.mimeType)) ? 'application/pdf' : 'image/jpeg';
+      const data = String((f && f.data) || '').replace(/^data:[^,]*,/, '');
+      if (!data) return;
+      bytes += data.length;
+      parts.push({ inline_data: { mime_type: mime, data: data } });
+    });
+    if (parts.length < 2) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: no pages were sent.' };
+    if (bytes > AI_MAX_BYTES) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the pages are too big for one reading (about 13 MB at most).' };
+    const payload = JSON.stringify({
+      contents: [{ role: 'user', parts: parts }],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: aiInvoiceSchema_(),
+        thinkingConfig: { thinkingBudget: 0 },   // quick answer: a fetch from Apps Script may take about 60 seconds at most
+      },
+    });
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + AI_MODEL + ':generateContent?key=' + encodeURIComponent(key);
+    let res = null;
+    let code = 0;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: payload, muteHttpExceptions: true });
+      code = res.getResponseCode();
+      // busy or a short limit: one more try, only when there is time left (Apps Script stops a request at 6 minutes)
+      if ((code === 429 || code === 500 || code === 503) && attempt === 0 && Date.now() - started < 60000) { Utilities.sleep(3000); continue; }
+      break;
+    }
+    const text = res.getContentText();
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { json = null; }
+    if (code !== 200) {
+      const why = json && json.error && json.error.message ? json.error.message : ('HTTP ' + code);
+      if (code === 400 && /api key/i.test(why)) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the GEMINI_KEY in Script properties was not accepted – make a new key at aistudio.google.com.' };
+      if (code === 429) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the free AI limit is used up for now – try again later.' };
+      return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(why, key) };
+    }
+    const cand = json && json.candidates && json.candidates[0];
+    if (!cand) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: no answer' + (json && json.promptFeedback && json.promptFeedback.blockReason ? ' (' + json.promptFeedback.blockReason + ')' : '') + '.' };
+    const out = ((cand.content && cand.content.parts) || []).map(function (p) { return p.text || ''; }).join('').trim();
+    let invoice;
+    try { invoice = JSON.parse(out.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); } catch (e) {
+      return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the answer was not complete' + (cand.finishReason ? ' (' + cand.finishReason + ')' : '') + '.' };
+    }
+    if (!invoice || typeof invoice !== 'object') return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the answer was empty.' };
+    return { ok: true, invoice: invoice, model: AI_MODEL, ms: Date.now() - started };
+  } catch (e) {
+    // a timeout or no connection from Google's side: the app reads it on the phone instead
+    return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(e && e.message ? e.message : e, key) };
+  }
 }
