@@ -22,7 +22,7 @@ const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 10;                // 1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 11;                // 1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -171,6 +171,10 @@ function doPost(e) {
         // GEMINI_KEY). Answers { ok, invoice: {…}, model } or { ok: false, code: 'NO_AI_KEY' | 'AI_ERROR', error }.
         return json_(aiReadInvoice_(body.files || [], body.hints || {}));
       }
+
+      case 'fccc_lpg':
+        // 1.0.0 build 54: the newest FCCC LPG authorisation read here (the phone could not): see fcccLpg_ at the end.
+        return json_(fcccLpg_());
 
       case 'file_put': {
         // v3.5 apps send an upload id + fingerprint: filed by type, checked, never duplicated (see filePut_).
@@ -1356,10 +1360,10 @@ function aiModels_() {
   return (own ? [own] : []).concat(AI_MODELS.filter(function (m) { return m !== own; }));
 }
 const AI_MAX_BYTES = 19 * 1024 * 1024;   // Gemini takes about 20 MB of pages in one request
-function aiInvoiceSchema_() {
+function aiInvoiceSchema_(hints) {
   const n = function (d) { return { type: 'NUMBER', nullable: true, description: d }; };
   const s = function (d) { return { type: 'STRING', nullable: true, description: d }; };
-  return {
+  const schema = {
     type: 'OBJECT',
     properties: {
       supplier: s('The company that SOLD the goods and issued the invoice (never Easy Buys, the buyer)'),
@@ -1392,6 +1396,12 @@ function aiInvoiceSchema_() {
     },
     required: ['lines'],
   };
+  // 1.0.0 build 54: a power or water bill (EFL / WAF) also gives its account number and due date
+  if (hints && hints.bill) {
+    schema.properties.account_no = s('The customer ACCOUNT number on the bill, digits only (not the invoice, meter or bill number)');
+    schema.properties.due_date = s('The date the bill must be paid by (Due Date / Pay By / Due on) as YYYY-MM-DD');
+  }
+  return schema;
 }
 function aiPrompt_(hints) {
   const h = hints || {};
@@ -1404,6 +1414,7 @@ function aiPrompt_(hints) {
     'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Read every item line, in order, across all pages; do not invent lines. Do not take the SDC / VMS fiscal invoice number as the invoice number.',
     'Give numbers as plain numbers (no $ or commas). Use null for anything not on the invoice.',
     known.length ? 'Known suppliers (use the exact name when it is one of these): ' + known.join('; ') + '.' : '',
+    h.bill ? aiBillPrompt_(h.bill) : '',
   ].filter(String).join('\n');
 }
 function aiScrub_(msg, key) {
@@ -1413,12 +1424,13 @@ function aiScrub_(msg, key) {
 }
 // files: [{ mimeType, data (base64) }] (at most 6), hints: { suppliers: [names], vatPct }
 // → { ok: true, invoice, model } | { ok: false, code: 'NO_AI_KEY' | 'AI_ERROR', error }
-function aiReadInvoice_(files, hints) {
+// opts (1.0.0 build 54): { prompt, schema } to read another paper with the same models (the FCCC gas prices).
+function aiReadInvoice_(files, hints, opts) {
   const key = String(PropertiesService.getScriptProperties().getProperty('GEMINI_KEY') || '').trim();
   if (!key) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the AI reader is not switched on – add GEMINI_KEY in Project settings › Script properties.' };
   const started = Date.now();
   try {
-    const parts = [{ text: aiPrompt_(hints) }];
+    const parts = [{ text: (opts && opts.prompt) || aiPrompt_(hints) }];
     let bytes = 0;
     (files || []).slice(0, 6).forEach(function (f) {
       const mime = /pdf/i.test(String(f && f.mimeType)) ? 'application/pdf' : 'image/jpeg';
@@ -1430,9 +1442,11 @@ function aiReadInvoice_(files, hints) {
     if (parts.length < 2) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: no pages were sent.' };
     if (bytes > AI_MAX_BYTES) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the pages are too big for one reading (about 13 MB at most).' };
     const body = function (model, think) {
-      const gc = { temperature: 0, responseMimeType: 'application/json', responseSchema: aiInvoiceSchema_() };
+      const gc = { temperature: 0, responseMimeType: 'application/json', responseSchema: (opts && opts.schema) || aiInvoiceSchema_(hints) };
       // quick answer: a fetch from Apps Script may take about 60 seconds at most
       if (think && /^gemini-2\./.test(model)) gc.thinkingConfig = { thinkingBudget: 0 };
+      // the newer models "think" before answering unless told not to – much slower for reading an invoice
+      else if (think) gc.thinkingConfig = { thinkingLevel: 'low' };
       return JSON.stringify({ contents: [{ role: 'user', parts: parts }], generationConfig: gc });
     };
     let res = null; let code = 0; let json = null; let used = ''; let lastWhy = '';
@@ -1460,7 +1474,7 @@ function aiReadInvoice_(files, hints) {
       // retired / unknown model, or this model's free limit used up: the next model
       // (also when Google is busy – "high demand" / overloaded – another model often has room)
       const nextOk = code === 404 || code === 429 || code === 500 || code === 503 || /no longer available|not found|not supported|deprecated|retired|high demand|overloaded|unavailable|try again later/i.test(lastWhy);
-      if (!nextOk || Date.now() - started > 150000) break;
+      if (!nextOk || Date.now() - started > 50000) break; // the phone is waiting: at most about a minute in all
     }
     if (code !== 200) {
       if (code === 429) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the free AI limit is used up for now – try again later.' };
@@ -1480,4 +1494,98 @@ function aiReadInvoice_(files, hints) {
     // a timeout or no connection from Google's side: the app reads it on the phone instead
     return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(e && e.message ? e.message : e, key) };
   }
+}
+
+// ================================================================ 1.0.0 build 54: power / water bills read by AI
+// hints.bill = 'power' (EFL) or 'water' (WAF): the same invoice reading, told it is a utility bill, with account_no and
+// due_date added to the answer (aiInvoiceSchema_).
+function aiBillPrompt_(kind) {
+  const who = kind === 'water' ? 'Water Authority of Fiji (WAF)' : kind === 'power' ? 'Energy Fiji Limited (EFL)' : 'Energy Fiji Limited (EFL) or the Water Authority of Fiji (WAF)';
+  return [
+    'This is a utility bill (or a screenshot of the bill checker) from ' + who + ', not a goods invoice. EFL = Energy Fiji Limited (electricity), WAF = Water Authority of Fiji (water).',
+    'What matters: account_no = the customer account number (digits only; not the meter number, bill number or invoice number), total_incl = the total amount due now (Total Amount Due / Amount Due / Total Payable, 0 when nothing is owing), due_date = the date to pay by as YYYY-MM-DD.',
+    'supplier = Energy Fiji Limited or Water Authority of Fiji. invoice_no = the bill or invoice number if printed, else null. invoice_date = the bill or issue date. Put any overdue / arrears amount in notes. A bill has no item lines: give lines as an empty list unless charges are listed.',
+  ].join('\n');
+}
+
+// ================================================================ 1.0.0 build 54: FCCC LPG (gas) prices read in the cloud
+// The phone could not read the FCCC page or PDF (no text in the PDF, the website refusing it, the web test build):
+// Apps Script fetches fccc.gov.fj/master-price-list/gas/, finds the newest "LPG Authorization (Effective dd/mm/yyyy)",
+// and reads Schedule 1 (Viti Levu & Vanua Levu) of its PDF with Gemini (GEMINI_KEY), or with Google Drive's text
+// reading when there is no AI key. → { ok, effective, url, prices: { kg: { w, r }, … } | text, engine }
+//   | { ok: false, code: 'FETCH' | 'NO_LIST' | 'NOT_READ', error }
+const FCCC_GAS_PAGE = 'https://fccc.gov.fj/master-price-list/gas/';
+const FCCC_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+function fcccIso_(y, m, d) { return y + '-' + ('0' + Number(m)).slice(-2) + '-' + ('0' + Number(d)).slice(-2); }
+function fcccFullUrl_(href) {
+  const u = String(href || '').replace(/&amp;/g, '&').trim();
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.indexOf('//') === 0) return 'https:' + u;
+  if (u.indexOf('/') === 0) return 'https://fccc.gov.fj' + u;
+  return FCCC_GAS_PAGE + u;
+}
+function fcccGasList_(html) {
+  const out = [];
+  const re = /<a\b[^>]*?href\s*=\s*["']([^"']+?\.pdf(?:[?#][^"']*)?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(String(html || '')))) {
+    const label = m[2].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
+    const url = fcccFullUrl_(m[1]);
+    if (!/LPG/i.test(label) && !/LPG/i.test(url)) continue;
+    let effective = null;
+    const d = /Authori[sz]ation\s*\(?\s*Effective\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i.exec(label);
+    if (d) effective = fcccIso_(d[3], d[2], d[1]);
+    else if (/Authori[sz]ation/i.test(label + url)) {
+      const f = /Effective[-_ ]+(\d{1,2})[-_ ]+([A-Za-z]{3,9})[-_ ]+(\d{2,4})/i.exec(url.split('/').pop() || '');
+      const mo = f && FCCC_MONTHS[f[2].slice(0, 3).toLowerCase()];
+      if (mo) effective = fcccIso_(f[3].length === 2 ? '20' + f[3] : f[3], mo, f[1]);
+    }
+    if (!effective || out.some(function (x) { return x.url === url; })) continue;
+    out.push({ url: url, effective: effective });
+  }
+  return out.sort(function (a, b) { return a.effective < b.effective ? 1 : -1; });
+}
+function fcccLpgSchema_() {
+  const n = function (d) { return { type: 'NUMBER', nullable: true, description: d }; };
+  const line = function (d) { return { type: 'OBJECT', nullable: true, description: d, properties: { w: n('Maximum WHOLESALE price in dollars'), r: n('Maximum RETAIL price in dollars') } }; };
+  return {
+    type: 'OBJECT',
+    properties: {
+      effective_date: { type: 'STRING', nullable: true, description: 'The date the prices start, YYYY-MM-DD' },
+      kg: line('Cylinder (residential) – Per KG'),
+      c4_5: line('4.5 KG Cylinder'),
+      c12: line('12 KG Cylinder'),
+      c40: line('40 KG Cylinder'),
+      c50: line('50 KG Cylinder'),
+      auto: line('Automotive gas (autogas) – Per Litre'),
+      notes: { type: 'STRING', nullable: true, description: 'Anything unclear' },
+    },
+  };
+}
+function fcccLpgPrompt_() {
+  return [
+    'This PDF is the Fijian Competition and Consumer Commission (FCCC) "Final Authorisation of Prices for the Supply of LPG Products in Fiji".',
+    'Read ONLY Schedule 1 (Viti Levu and Vanua Levu) – never Schedule 2 or other islands. For each product give the maximum wholesale price (w) and retail price (r) in Fiji dollars as plain numbers.',
+    'kg = the residential cylinder "Per KG" line (NOT the "Bulk – Ex Factory" per kg line). c4_5, c12, c40, c50 = the 4.5, 12, 40 and 50 KG cylinders. auto = Automotive Gas per litre. Use null for anything not printed (NA).',
+  ].join('\n');
+}
+function fcccLpg_() {
+  const get = function (url) { return UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) EasyBuysApp', Accept: 'text/html,application/pdf,*/*' } }); };
+  let page;
+  try { page = get(FCCC_GAS_PAGE); } catch (e) { return { ok: false, code: 'FETCH', error: 'FETCH: could not open the FCCC gas page (' + String(e && e.message ? e.message : e).slice(0, 120) + ').' }; }
+  if (page.getResponseCode() !== 200) return { ok: false, code: 'FETCH', error: 'FETCH: the FCCC gas page answered ' + page.getResponseCode() + '.' };
+  const list = fcccGasList_(page.getContentText());
+  if (!list.length) return { ok: false, code: 'NO_LIST', error: 'NO_LIST: no LPG authorisation was found on the FCCC gas page.' };
+  const n = list[0];
+  let pdf;
+  try { pdf = get(n.url); } catch (e) { return { ok: false, code: 'FETCH', error: 'FETCH: could not download the ' + n.effective + ' authorisation.' }; }
+  if (pdf.getResponseCode() !== 200) return { ok: false, code: 'FETCH', error: 'FETCH: the ' + n.effective + ' authorisation answered ' + pdf.getResponseCode() + '.' };
+  const bytes = pdf.getBlob().getBytes();
+  const ai = aiReadInvoice_([{ mimeType: 'application/pdf', data: Utilities.base64Encode(bytes) }], {}, { prompt: fcccLpgPrompt_(), schema: fcccLpgSchema_() });
+  if (ai.ok && ai.invoice && (ai.invoice.c12 || ai.invoice.c4_5)) return { ok: true, effective: n.effective, url: n.url, prices: ai.invoice, engine: 'ai', model: ai.model };
+  // no AI key, or the AI could not read it: Google Drive's text reading of the PDF (the app finds the prices in it)
+  let text = '';
+  try { text = ocr_(Utilities.newBlob(bytes, 'application/pdf', 'fccc-lpg.pdf')); } catch (e) { text = ''; }
+  if (text) return { ok: true, effective: n.effective, url: n.url, text: String(text).slice(0, 60000), engine: 'ocr' };
+  return { ok: false, code: 'NOT_READ', error: 'NOT_READ: the ' + n.effective + ' authorisation could not be read' + (ai.error ? ' (' + String(ai.error).slice(0, 150) + ')' : '') + '.' };
 }
