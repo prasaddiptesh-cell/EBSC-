@@ -1449,7 +1449,8 @@ function aiReadInvoice_(files, hints) {
         // a model that does not take the "quick answer" setting: once more without it
         if (code === 400 && think && /thinking/i.test(why0)) { think = false; continue; }
         // busy: one more try, only when there is time left (Apps Script stops a request at 6 minutes)
-        if ((code === 500 || code === 503) && attempt === 0 && Date.now() - started < 60000) { Utilities.sleep(3000); continue; }
+        // (a busy model – 503 – is not tried again: the next model is asked straight away)
+        if (code === 500 && attempt === 0 && Date.now() - started < 60000) { Utilities.sleep(3000); continue; }
         break;
       }
       used = model;
@@ -1457,11 +1458,13 @@ function aiReadInvoice_(files, hints) {
       lastWhy = json && json.error && json.error.message ? json.error.message : ('HTTP ' + code);
       if (code === 400 && /api key/i.test(lastWhy)) return { ok: false, code: 'NO_AI_KEY', error: 'NO_AI_KEY: the GEMINI_KEY in Script properties was not accepted – make a new key at aistudio.google.com.' };
       // retired / unknown model, or this model's free limit used up: the next model
-      const nextOk = code === 404 || code === 429 || /no longer available|not found|not supported|deprecated|retired/i.test(lastWhy);
+      // (also when Google is busy – "high demand" / overloaded – another model often has room)
+      const nextOk = code === 404 || code === 429 || code === 500 || code === 503 || /no longer available|not found|not supported|deprecated|retired|high demand|overloaded|unavailable|try again later/i.test(lastWhy);
       if (!nextOk || Date.now() - started > 150000) break;
     }
     if (code !== 200) {
       if (code === 429) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: the free AI limit is used up for now – try again later.' };
+      if (code === 503 || /high demand|overloaded/i.test(lastWhy)) return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: Google\'s AI is busy right now – tap "Read again" in a few minutes.' };
       return { ok: false, code: 'AI_ERROR', error: 'AI_ERROR: ' + aiScrub_(lastWhy, key) };
     }
     const cand = json && json.candidates && json.candidates[0];
