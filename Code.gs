@@ -18,17 +18,23 @@ const API_KEY = 'PASTE-THE-KEY-FROM-THE-APP-HERE';
 
 // 2) Choose a password for opening the online dashboard.
 const DASHBOARD_PASSWORD = 'choose-a-dashboard-password';
+// 1.0.0 build 1: better – keep both in Project Settings › Script properties as API_KEY and DASHBOARD_PASSWORD (then the
+// lines above can stay as they are; the Script properties win). See CLOUD-SETUP.md.
+function apiKey_() { return PropertiesService.getScriptProperties().getProperty('API_KEY') || API_KEY; }
 
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 11;                // 1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 12;                // 1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
 
 // ---------------------------------------------------------------- helpers
 function json_(obj) {
+  // 1.0.0 build 1 (hardening): every reply carries the cloud's own clock (ms since 1970, UTC) so a device can tell when
+  // its clock is wrong (the app refuses money work then – the time is always Fiji time).
+  if (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.serverTime === undefined) obj.serverTime = Date.now();
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 function root_() {
@@ -44,11 +50,23 @@ function path_(names) {
   names.filter(String).forEach(function (n) { f = folder_(f, n); });
   return f;
 }
+// 1.0.0 build 1: a file is never replaced or binned – a second file with the same name gets " (2)", " (3)"… so a photo,
+// report or backup already kept can't be swapped by sending another with its name.
 function saveFile_(folder, fileName, base64, mime) {
+  let name = String(fileName);
+  if (folder.getFilesByName(name).hasNext()) {
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name; const ext = dot > 0 ? name.slice(dot) : '';
+    for (let i = 2; i < 500 && folder.getFilesByName(name).hasNext(); i++) name = stem + ' (' + i + ')' + ext;
+  }
+  const blob = Utilities.newBlob(Utilities.base64Decode(base64), mime, name);
+  return folder.createFile(blob);
+}
+// Only for the cloud's own working files (the dashboard figures): replaced each time.
+function replaceFile_(folder, fileName, base64, mime) {
   const existing = folder.getFilesByName(fileName);
   while (existing.hasNext()) existing.next().setTrashed(true);
-  const blob = Utilities.newBlob(Utilities.base64Decode(base64), mime, fileName);
-  return folder.createFile(blob);
+  return folder.createFile(Utilities.newBlob(Utilities.base64Decode(base64), mime, fileName));
 }
 function log_(sheetName, row) {
   const ssIt = root_().getFilesByName('Bakery Cloud Log');
@@ -58,7 +76,9 @@ function log_(sheetName, row) {
     return created;
   })();
   const sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-  sh.appendRow([new Date()].concat(row));
+  sh.appendRow([new Date()].concat((row || []).map(function (v) { return typeof v === 'string' ? esc_(v) : v; })));
+  // 1.0.0 build 1: every refusal is a security event for the owner (wrong PINs count up separately: failCount_).
+  if (sheetName === 'Refused' && String((row || [])[1]) !== 'user_login') secEvent_('refused', { device: String((row || [])[0] || ''), what: (row || []).slice(1).join(' – ') });
 }
 function cleanEmails_(list) {
   return (list || []).map(function (e) { return String(e).trim(); }).filter(function (e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); });
@@ -70,35 +90,63 @@ function doPost(e) {
     const body = JSON.parse(e.postData.contents);
     // Viber calls this address (the channel's webhook) to check it is alive, and with channel events: just say OK.
     if (body && body.event && !body.kind) return json_({ ok: true });
-    try { viberUnshare_(); } catch (x) { /* never stops a request */ }
     // --- the main Easy Buys software (office PC) ---
     if (body.kind === 'main_pull' || body.kind === 'main_push' || body.kind === 'main_devices' || body.kind === 'main_link_check') return json_(mainApi_(body));
     if (body.kind === 'main_files' || body.kind === 'main_file_get') return json_(mainFiles_(body)); // v3.5 Windows software: full file mirror
+    // --- 1.0.0 build 1: a till PC's own key (its Aronium records and its link check only) ---
+    if (body.kind === 'link_push' || body.kind === 'link_check') return json_(linkApi_(body));
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
+    // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
+    if (body.kind === 'email_login_start') return json_(emailLoginStart_(body));
+    if (body.kind === 'email_login_finish') return json_(emailLoginFinish_(body));
     const who = auth_(body);
     if (!who.ok) return json_({ ok: false, error: who.error, blocked: !!who.blocked, waiting: !!who.waiting, lock: who.lock || null, wipe: !!who.wipe, removed: !!who.removed });
-    if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId));
-    if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false); devicePulled_(who.deviceId, body, out); return json_(out); }
-    if (body.kind === 'invite_create') return json_(inviteCreate_(body, who));
+    // Only now (a known device): housekeeping that writes settings.
+    try { viberUnshare_(); } catch (x) { /* never stops a request */ }
+    // 1.0.0 build 1 (script 12): PINs in the cloud copy are hashed once (and every PIN that arrives is hashed).
+    try { migratePins_(); } catch (x) { /* tried again on the next request */ }
+    who.user = sessionUser_(body, who);
+    if (body.kind === 'user_login') return json_(userLogin_(body, who));
+    if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
+    if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who); devicePulled_(who.deviceId, body, out); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.user = who.user ? who.user.role : null; return json_(out); }
+    if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
-    if (body.kind === 'device_status') return json_(deviceStatus_(body.id, body.status, who));
-    if (body.kind === 'device_control') return json_(deviceControl_(body, who));
+    if (body.kind === 'device_status') return json_(needOwner_(who, body, 'Blocking or allowing a device') || deviceStatus_(body.id, body.status, who));
+    if (body.kind === 'device_control') return json_(needOwner_(who, body, 'Changing a device') || deviceControl_(body, who));
     if (body.kind === 'problem_log') return json_(problemLogSave_(body, who));
     if (body.kind === 'problem_log_get') return json_(problemLogGet_(body.id));
-    if (body.kind === 'cloud_settings') return json_(cloudSettings_(body));
+    if (body.kind === 'cloud_settings') return json_((body.requireApproval === undefined && body.strictSign === undefined && body.linkCutover === undefined ? null : needOwner_(who, body, 'Changing the cloud settings')) || cloudSettings_(body));
     if (body.kind === 'fresh_start') return json_(freshStart_(body));
+    if (body.kind === 'clean_start') return json_(needOwner_(who, body, 'Start clean') || cleanStart_(body, who));
+    if (body.kind === 'setup_pack') return json_(needOwner_(who, body, 'The supplier set-up pack') || setupPack_());
+    if (body.kind === 'email_password_set') return json_(emailPasswordSet_(body, who));
+    if (body.kind === 'security_email') {
+      // where security alerts go: only the owner, logged in, with the PIN typed again
+      if (!who.user || who.user.role !== 'owner' || !proofOk_(who.user.uid, body.ownerProof)) return json_({ ok: false, error: 'The owner must be logged in and type their PIN again.' });
+      const se = cleanEmails_([body.email])[0];
+      if (!se) return json_({ ok: false, error: 'That does not look like an email address.' });
+      const before = secEmail_();
+      props_().setProperty('SECURITY_EMAIL', se);
+      secEvent_('locked_change', { device: who.deviceId, person: who.user.name, what: 'Security alerts now go to ' + se + ' (were ' + before + ')', refused: false });
+      return json_({ ok: true, email: se });
+    }
+    if (body.kind === 'link_keys') return json_({ ok: true, tills: Object.keys(linkKeys_()).map(function (h) { const x = linkKeys_()[h]; return { source: x.source, at: x.at, by: x.by }; }) });
+    if (body.kind === 'link_key') return json_(needOwner_(who, body, 'A till PC key') || linkKeyCreate_(body, who));
+    if (['backup_list', 'backup_get', 'myday_events', 'myday_out'].indexOf(body.kind) >= 0) { const no = needOwner_(who, body, body.kind.indexOf('backup') === 0 ? 'Backups' : 'The owner\'s calendar'); if (no) return json_(no); }
     switch (body.kind) {
       case 'ping':
-        return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: SCRIPT_VERSION });
+        return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: SCRIPT_VERSION, pinSalt: pinSalt_(body.pinSalt), admin: !!who.admin, user: who.user ? who.user.role : null });
 
       case 'snapshot': {
+        // 1.0.0 build 1: the online dashboard's figures come only from the main tablet (the one holding the cloud key).
+        if (!who.viaKey) return json_({ ok: false, error: 'Only the main tablet sends the dashboard figures.' });
         const props = PropertiesService.getScriptProperties();
         const text = JSON.stringify(body.snapshot);
         // Script properties hold up to ~9 KB per value, so larger snapshots go to a Drive file.
         if (text.length < 8500) { props.setProperty('SNAPSHOT', text); props.deleteProperty('SNAPSHOT_FILE'); }
         else {
-          const f = saveFile_(root_(), 'dashboard-status.json', Utilities.base64Encode(text, Utilities.Charset.UTF_8), 'application/json');
+          const f = replaceFile_(root_(), 'dashboard-status.json', Utilities.base64Encode(text, Utilities.Charset.UTF_8), 'application/json');
           props.setProperty('SNAPSHOT_FILE', f.getId());
           props.deleteProperty('SNAPSHOT');
         }
@@ -114,11 +162,12 @@ function doPost(e) {
         const folder = path_(['Shift reports', body.month || 'Other']);
         const pdf = saveFile_(folder, body.fileName + '.pdf', body.pdf, MimeType.PDF);
         const xlsx = body.xlsx ? saveFile_(folder, body.fileName + '.xlsx', body.xlsx, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') : null;
-        const to = cleanEmails_(body.emails);
+        // 1.0.0 build 1: only to addresses the owner saved (Admin › Emails), and the device's text is shown as text, not HTML.
+        const to = onlyAllowed_(cleanEmails_(body.emails), false);
         if (to.length) {
-          MailApp.sendEmail({
-            to: to.join(','), subject: body.subject,
-            htmlBody: '<p>The shift has been balanced and approved. The full report is attached (PDF and Excel) and saved in Google Drive.</p>' + body.html,
+          mail_({
+            to: to.join(','), subject: String(body.subject || '').slice(0, 200),
+            htmlBody: '<p>The shift has been balanced and approved. The full report is attached (PDF and Excel) and saved in Google Drive.</p>' + asText_(body.html),
             attachments: [pdf.getBlob()].concat(xlsx ? [xlsx.getBlob()] : []),
             name: 'Easy Buys Bakery',
           });
@@ -130,12 +179,12 @@ function doPost(e) {
       case 'po': {
         const folder = path_(['Purchase orders', body.month || 'Other']);
         const pdf = saveFile_(folder, body.fileName + '.pdf', body.pdf, MimeType.PDF);
-        const to = cleanEmails_(body.emails);
+        const to = onlyAllowed_(cleanEmails_(body.emails), true);
         if (to.length) {
-          MailApp.sendEmail({
-            to: to.join(','), subject: body.subject,
+          mail_({
+            to: to.join(','), subject: String(body.subject || '').slice(0, 200),
             htmlBody: '<p>Stock has reached the minimum level. Purchase order attached for reordering'
-              + (body.supplierEmail ? ' (supplier email: ' + body.supplierEmail + ')' : '') + '.</p>' + body.html,
+              + (body.supplierEmail ? ' (supplier email: ' + asText_(body.supplierEmail) + ')' : '') + '.</p>' + asText_(body.html),
             attachments: [pdf.getBlob()], name: 'Easy Buys Bakery',
           });
         }
@@ -215,6 +264,7 @@ function doPost(e) {
         // Only files kept in Easy Buys › Backups can be fetched this way.
         const file = DriveApp.getFileById(String(body.id || ''));
         if (!insideFolder_(file, path_(['Backups']).getId(), 2)) return json_({ ok: false, error: 'Not an Easy Buys backup.' });
+        secEvent_('backup', { device: who.deviceId, person: who.user ? who.user.name : '', what: 'Backup downloaded: ' + file.getName(), refused: false });
         return json_({ ok: true, name: file.getName(), text: file.getBlob().getDataAsString('UTF-8') });
       }
 
@@ -222,7 +272,11 @@ function doPost(e) {
         // Viber Channel "Post API": the token comes from the channel's Settings › Developer tools. Kept only here.
         // v7: the Viber token comes as viberToken – "token" is the device's own pass (it was overwritten before).
         const token = String(body.viberToken || '').trim();
-        // v9: a shop's own channel (shopCode) or the main channel.
+        // 1.0.0 build 1: Viber tokens are locked – only from the owner's / admin's device.
+        const na = needAdmin_(who, 'Connecting a Viber Channel');
+        if (na) return json_(na);
+        // v9: a shop's own channel (shopCode) or the main channel. 1.0.0 build 1: shopCode 'OWNER' = the owner / admin
+        // channel, where business-wide money alerts go.
         const sfx = viberSuffix_(body.shopCode);
         const current = PropertiesService.getScriptProperties().getProperty('VIBER_TOKEN' + sfx);
         // Replacing or removing a token needs the current one (so a lost tablet cannot take the alerts over).
@@ -243,7 +297,7 @@ function doPost(e) {
         // Only to people being onboarded (their email is in the synced onboarding records) – a device cannot email anyone else.
         if (!staffEmail_(to[0])) return json_({ ok: false, error: 'This address is not a staff member being onboarded.' });
         const atts = (body.attachments || []).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'document.pdf'); });
-        MailApp.sendEmail({ to: to.join(','), subject: String(body.subject || 'Easy Buys'), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        mail_({ to: to.join(','), subject: String(body.subject || 'Easy Buys'), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
         log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
         return json_({ ok: true });
       }
@@ -254,7 +308,7 @@ function doPost(e) {
         if (!to.length) return json_({ ok: false, error: 'No valid email address.' });
         if (!payEmail_(to[0]) && !staffEmail_(to[0])) return json_({ ok: false, error: 'This address is not in anyone\'s pay details.' });
         const atts = (body.attachments || []).slice(0, 2).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'payslip.pdf'); });
-        MailApp.sendEmail({ to: to[0], subject: String(body.subject || 'Easy Buys payslip').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        mail_({ to: to[0], subject: String(body.subject || 'Easy Buys payslip').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
         log_('Emails', [to[0], body.subject, atts.length + ' attachment(s)']);
         return json_({ ok: true });
       }
@@ -264,14 +318,14 @@ function doPost(e) {
         const to = prefEmails_('accountant_pack');
         if (!to.length) return json_({ ok: false, error: 'No accountant email saved in Admin › Emails.' });
         const atts = (body.attachments || []).slice(0, 3).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/octet-stream', a.name || 'pack.xlsx'); });
-        MailApp.sendEmail({ to: to.join(','), subject: String(body.subject || 'Easy Buys accountant pack').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
+        mail_({ to: to.join(','), subject: String(body.subject || 'Easy Buys accountant pack').slice(0, 200), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
         log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
         return json_({ ok: true, emailed: to.length });
       }
 
       case 'support_email': {
         // v3.5 "Send to support": problem reports go only to the app's support address (fixed here, not chosen by the device).
-        MailApp.sendEmail({ to: SUPPORT_EMAIL, subject: String(body.subject || 'Easy Buys problem report').slice(0, 200),
+        mailEssential_({ to: SUPPORT_EMAIL, subject: String(body.subject || 'Easy Buys problem report').slice(0, 200),
           body: String(body.text || '').slice(0, 60000) + '\n\nDevice: ' + who.deviceId, name: 'Easy Buys' });
         log_('Emails', [SUPPORT_EMAIL, body.subject, 'support']);
         return json_({ ok: true });
@@ -312,10 +366,14 @@ function doPost(e) {
         // v3.5 My day: the app tasks of one day → the separate "Easy Buys – My day" calendar (made if missing).
         return json_(mydayOut_(String(body.date || ''), body.items || [], String(body.calendar || '')));
 
-      case 'viber':
+      case 'viber': {
         // v7: a post can carry photos (invoice, cheque stub) and a PDF (purchase order). See viberFiles_.
-        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4), body.shopCode));
-        return json_(viber_(String(body.text || '').slice(0, 7000), body.shopCode));
+        // 1.0.0 build 1: owner: true = a business-wide money alert – it goes ONLY to the owner / admin channel when there is
+        // one (never to a shop's channel, where the staff are); without an owner channel, to the main channel as before.
+        const ch = body.owner ? (viberKey_('OWNER') ? 'OWNER' : '') : body.shopCode;
+        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4), ch));
+        return json_(viber_(String(body.text || '').slice(0, 7000), ch));
+      }
 
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
@@ -348,6 +406,33 @@ function prefEmails_(type) {
     } catch (e) { /* ignore */ }
   });
   return out;
+}
+
+// 1.0.0 build 1: emails only go to addresses the owner saved in Admin › Emails (any kind of email that is not Off) – a
+// purchase order also to the suppliers' own addresses. Anything else is dropped.
+function onlyAllowed_(list, suppliers) {
+  const ok = {};
+  ['shift_report', 'bakery_po', 'accountant_pack', 'po', 'reports', 'payslips'].concat(allPrefTypes_()).forEach(function (t) { prefEmails_(t).forEach(function (a) { ok[a.toLowerCase()] = true; }); });
+  if (suppliers) {
+    const sh = data_().getSheetByName('T_ap_suppliers');
+    if (sh) values_(sh).forEach(function (r) { try { const e = String(JSON.parse(r[4] || '{}').email || '').trim().toLowerCase(); if (e) ok[e] = true; } catch (x) { /* none */ } });
+  }
+  return (list || []).filter(function (a) { return ok[String(a).toLowerCase()]; });
+}
+function allPrefTypes_() {
+  const sh = data_().getSheetByName('T_shared_settings');
+  if (!sh) return [];
+  let out = [];
+  values_(sh).forEach(function (r) {
+    if (String(r[0]) !== 'email_prefs') return;
+    try { const row = JSON.parse(r[4] || '{}'); const prefs = typeof row.value === 'string' ? JSON.parse(row.value) : row.value; out = Object.keys(prefs || {}); } catch (e) { /* none */ }
+  });
+  return out;
+}
+// A device's words in an email: shown as text (no links, no HTML).
+function asText_(s) {
+  return '<pre style="font-family:inherit;white-space:pre-wrap">' + String(s || '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|tr|li|h\d)>/gi, '\n').replace(/<[^>]*>/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 20000) + '</pre>';
 }
 
 function staffEmail_(addr) {
@@ -498,7 +583,8 @@ function doGet(e) {
   return HtmlService.createTemplateFromFile('Dashboard').evaluate()
     .setTitle('Easy Buys Business Dashboard')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    // 1.0.0 build 1: the dashboard cannot be shown inside another website (no framing).
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
 
 // The page an invite link opens on the new phone or tablet (email and WhatsApp do not open app links directly).
@@ -523,15 +609,32 @@ function linkUrl_(url, linkCode) {
 // The dashboard password: the sample one is refused (anyone can read it in the public code), and after 10 wrong
 // passwords the dashboard stays shut for an hour. Returns null when the password is right, or the answer to send back.
 const DASH_MAX_FAILS = 10;
+// 1.0.0 build 1: the wrong tries are counted per visitor (Google's anonymous key for the browser), so someone guessing
+// cannot lock the owner out; the password is preferably kept in Script properties › DASHBOARD_PASSWORD.
+function dashPass_() { return PropertiesService.getScriptProperties().getProperty('DASHBOARD_PASSWORD') || DASHBOARD_PASSWORD; }
 function dashCheck_(password) {
-  if (!DASHBOARD_PASSWORD || DASHBOARD_PASSWORD === 'choose-a-dashboard-password' || String(DASHBOARD_PASSWORD).length < 6) {
+  const pass = dashPass_();
+  if (!pass || pass === 'choose-a-dashboard-password' || String(pass).length < 6) {
     return { ok: false, error: 'The dashboard password has not been set in the cloud program yet (step 2 at the top).' };
   }
+  let caller = '';
+  try { caller = Session.getTemporaryActiveUserKey() || ''; } catch (e) { caller = ''; }
   const cache = CacheService.getScriptCache();
-  const fails = Number(cache.get('dash_fails') || '0');
-  if (fails >= DASH_MAX_FAILS) return { ok: false, error: 'Too many wrong passwords. The dashboard is locked for an hour.' };
-  if (String(password || '') !== DASHBOARD_PASSWORD) {
-    cache.put('dash_fails', String(fails + 1), 3600);
+  // 1.0.0 build 1 (hardening, abuse C19/C20): a browser Google can tell apart is locked after 10 wrong passwords (only
+  // that browser). Callers Google cannot tell apart (no user key) share one counter, so that counter never locks: after
+  // 20 wrong passwords in an hour only one password is checked every 5 seconds – guessing is slowed to a crawl, and the
+  // owner still gets in (at most a few seconds' wait).
+  const key = 'dash_fails_' + sha_(caller || 'anyone').slice(0, 16);
+  const fails = Number(cache.get(key) || '0');
+  if (caller && fails >= DASH_MAX_FAILS) return { ok: false, error: 'Too many wrong passwords from this browser. Try again in an hour.' };
+  if (!caller && fails >= 2 * DASH_MAX_FAILS) {
+    const last = Number(cache.get('dash_slow_at') || '0');
+    if (Date.now() - last < 5000) return { ok: false, slow: true, error: 'Too many wrong passwords – wait 5 seconds and try again.' };
+    cache.put('dash_slow_at', String(Date.now()), 3600);
+  }
+  if (String(password || '') !== String(pass)) {
+    cache.put(key, String(fails + 1), 3600);
+    failCount_('dash', caller, { what: '5 wrong online dashboard passwords in 10 minutes from one browser' });
     return { ok: false, error: 'Wrong password' };
   }
   return null;
@@ -650,7 +753,7 @@ function values_(sh) {
 // Safety net if a cell was ever typed or formatted by hand.
 function text_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-  return v === null || v === undefined ? '' : String(v);
+  return v === null || v === undefined ? '' : unesc_(String(v));
 }
 const TABLE_HEADER = ['key', 'updated_at', 'device', 'seq', 'json'];
 const CHANGES_HEADER = ['seq', 'table', 'key', 'row', 'device', 'received_at'];
@@ -669,21 +772,39 @@ function withLock_(fn) {
 }
 
 // Store records from a device (or the main software). The newest change wins.
-function push_(records, deviceId) {
+// 1.0.0 build 1 (script 12): only known tables; times in the future refused; the change history only grows (with a
+// running fingerprint); locked records and settings need an owner / admin session (lockedChange_); PINs are hashed and
+// locked with the pepper (hashUserRow_); each accepted record keeps who the cloud checked (_vby).
+// who: the device (and its person) – none for the main software.
+function push_(records, deviceId, who) {
   return withLock_(function () {
-    const props = PropertiesService.getScriptProperties();
+    who = who || { deviceId: deviceId, main: true };
+    // The main software's key (MAIN_KEY) is not a person either: it may not make owners, change roles / PINs or locked
+    // settings (audit C3 – until every till PC has its own key, MAIN_KEY is on the till PCs).
+    const boss = isBoss_(who);
+    const bootstrap = !!who.viaKey && !anyBossProof_();      // a new business: the main tablet sets up the first owner
+    const oldAdmin = !boss && transition_() && !!who.admin && !who.signed; // an old app on an admin device, for 7 days
+    const props = props_();
     let seq = Number(props.getProperty('SEQ') || '0');
     let fresh = null;
     try { fresh = JSON.parse(props.getProperty('FRESH') || 'null'); } catch (e) { fresh = null; }
     const changes = sheet_('Changes', CHANGES_HEADER);
+    const ss = data_();
+    const tz = Session.getScriptTimeZone();
+    const future = Utilities.formatDate(new Date(Date.now() + 26 * 3600000), tz, 'yyyy-MM-dd HH:mm:ss');
+    // 1.0.0 build 1 (hardening): the closed-month lock, read once per push (money records dated in a closed month)
+    let lockDay = null;
+    try { const gl = sharedSetting_('gl_lock'); lockDay = gl && gl.date ? String(gl.date).slice(0, 10) : null; } catch (e) { lockDay = null; }
     const byTable = {};
+    const rejected = [];
     records.forEach(function (r) {
-      if (!r || !r.t || !/^[a-z_]+$/.test(r.t) || r.k === undefined || r.k === null) return;
+      if (!r || !r.t || !/^[a-z_0-9]+$/.test(r.t) || r.k === undefined || r.k === null) return;
+      if (KNOWN_TABLES.indexOf(r.t) < 0 && !ss.getSheetByName('T_' + r.t)) { rejected.push({ t: String(r.t), k: String(r.k), why: 'unknown table' }); return; }
       (byTable[r.t] = byTable[r.t] || []).push(r);
     });
     const accepted = [];
-    const rejected = [];
     const newChanges = [];
+    const history = [];
     Object.keys(byTable).forEach(function (table) {
       const sh = sheet_('T_' + table, TABLE_HEADER);
       const rows = keysOf_(sh); // only key and time (the records themselves can be big: till figures)
@@ -694,10 +815,48 @@ function push_(records, deviceId) {
         const key = String(r.k);
         const updated = String(r.u || (r.row && r.row.updated_at) || '');
         const have = index[key];
+        if (updated.replace('T', ' ').slice(0, 19) > future) { rejected.push({ t: table, k: key, why: 'time in the future' }); log_('Refused', [deviceId, table + ' ' + key, 'time in the future ' + updated]); return; }
+        if (table === 'audit_log' && have) { rejected.push({ t: table, k: key, why: 'the change history cannot be changed' }); log_('Refused', [deviceId, 'audit_log ' + key, 'history change']); return; }
         if (have && have.updated > updated) { rejected.push({ t: table, k: key, why: 'newer change already in the cloud' }); return; }
         if (fresh && fresh.tables.indexOf(table) >= 0 && updated && updated < fresh.at) { rejected.push({ t: table, k: key, why: 'from before the fresh start' }); return; }
+        let row = {};
+        Object.keys(r.row || {}).forEach(function (c) { row[c] = r.row[c]; });
+        delete row._vby;
+        const haveRow = have ? (rowsAt_(sh, [have.i])[have.i] || null) : null;
+        // Locked records and settings: an owner / admin session (the device gets the cloud's copy back to show what is in force).
+        const why = bootstrap ? null : (lockedChange_(table, key, table === 'users' ? hashUserRow_(row, key, false) : row, haveRow, boss, oldAdmin)
+          || periodChange_(table, row, haveRow, boss, lockDay) || shopChange_(table, row, haveRow, boss, who));
+        if (why) {
+          let cur = null;
+          if (haveRow) { try { cur = forDevice_(table, JSON.parse(haveRow[4] || 'null'), key, who); } catch (e) { cur = null; } }
+          rejected.push({ t: table, k: key, why: why, code: 'LOGIN', restore: cur, gone: !have });
+          log_('Refused', [deviceId, table + ' ' + key, why]);
+          return;
+        }
+        // Security events for the owner: a locked setting / record changed (who, what, before → after), Link warnings.
+        if (boss || bootstrap || oldAdmin) {
+          try {
+            if (lockedChange_(table, key, table === 'users' ? hashUserRow_(row, key, false) : row, haveRow, false, false)) {
+              let bf = null; try { bf = haveRow ? JSON.parse(haveRow[4] || 'null') : null; } catch (e) { bf = null; }
+              const show = function (o) { if (!o) return 'nothing'; const c = {}; Object.keys(o).forEach(function (x) { if (!/pin|password|proof|_vby|face|updated/.test(x)) c[x] = o[x]; }); return JSON.stringify(c).slice(0, 400); };
+              secEvent_('locked_change', { device: who.deviceId, person: who.user ? who.user.name + ' (' + who.user.role + ')' : (bootstrap ? 'first set-up' : 'old app on an admin device'), what: table + ' ' + key + ': ' + show(bf) + ' → ' + show(row), refused: false });
+            }
+          } catch (e) { /* never stops the push */ }
+        }
+        if (table === 'aronium_feed' && row && String(row.kind || '') === 'link_event') secEvent_('link_event', { device: 'till PC ' + String(row.source || key.split('|')[0]), shop: String(row.shop_code || ''), what: String(row.data || row.text || 'Aronium Link event').slice(0, 500), refused: false });
+        if (table === 'users') {
+          // A plain PIN (old apps) never stays; a record without a PIN (the main software, a name change) keeps the PIN in force.
+          row = hashUserRow_(row, key, boss || bootstrap || oldAdmin || !have);
+          if (!row.pin_hash && haveRow) { try { const cur = JSON.parse(haveRow[4] || '{}'); if (cur.pin_hash) row.pin_hash = cur.pin_hash; } catch (e) { /* none */ } }
+        }
+        // Who the cloud vouches for: the person logged in (session); the first owner set up on the main tablet; an old app on
+        // an admin device during the 7 days. Devices only apply locked records the cloud vouches for (services/locked.js).
+        if (who.user) row._vby = { uid: who.user.uid, role: who.user.role };
+        else if (bootstrap) row._vby = { uid: 'first-setup', role: 'owner' };
+        else if (oldAdmin) row._vby = { uid: who.deviceId, role: 'admin', old: true };
         seq += 1;
-        const line = [key, updated, deviceId, seq, JSON.stringify(r.row || {})];
+        const json = JSON.stringify(row);
+        const line = [esc_(key), esc_(updated), esc_(deviceId), seq, json];
         let rowNo;
         if (have) {
           rowNo = have.i;
@@ -707,12 +866,14 @@ function push_(records, deviceId) {
           appends.push(line);
           index[key] = { i: rowNo, updated: updated };
         }
-        newChanges.push([seq, table, key, rowNo, deviceId, now_()]);
+        if (table === 'audit_log') history.push({ seq: seq, key: key, json: json });
+        newChanges.push([seq, table, esc_(key), rowNo, esc_(deviceId), now_()]);
         accepted.push({ t: table, k: key });
       });
       if (appends.length) sh.getRange(sh.getLastRow() + 1, 1, appends.length, TABLE_HEADER.length).setValues(appends);
     });
     if (newChanges.length) changes.getRange(changes.getLastRow() + 1, 1, newChanges.length, CHANGES_HEADER.length).setValues(newChanges);
+    historyChain_(history);
     props.setProperty('SEQ', String(seq));
     return { ok: true, accepted: accepted.length, rejected: rejected, seq: seq };
   });
@@ -739,20 +900,34 @@ function rowsAt_(sh, rowNos) {
 }
 const PULL_MAX_CHARS = 3500000; // one answer stays small enough for a tablet on a slow connection
 
-// Changes after `since`, made by other devices (the main software gets everything).
-function pull_(since, deviceId, forMain) {
+// The first row of the Changes sheet with a change number after `since` (the sheet is in change-number order, also after
+// compactChanges). Before compacting, row n+1 holds change n, so older apps' positions mean the same.
+function firstAfter_(sh, since, last) {
+  let lo = 2; let hi = last + 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const v = Number(sh.getRange(mid, 1, 1, 1).getValues()[0][0]) || 0;
+    if (v > since) hi = mid; else lo = mid + 1;
+  }
+  return lo;
+}
+// Changes after `since`, made by other devices (the main software gets everything). who: the device asking – what it may
+// receive is trimmed by forDevice_; the change history only goes to admin devices.
+function pull_(since, deviceId, forMain, who) {
+  who = who || { deviceId: deviceId, forMain: !!forMain, admin: !!forMain };
+  if (forMain) who.forMain = true;
   const changes = sheet_('Changes', CHANGES_HEADER);
   const last = changes.getLastRow();
-  const total = Math.max(0, last - 1);
-  if (since >= total) return { ok: true, records: [], next: total, more: false };
-  const count = Math.min(PULL_LIMIT, total - since);
-  const list = changes.getRange(since + 2, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
-  // which rows of which tables this page needs (only the latest version of a record in this page)
+  const start = last >= 2 ? firstAfter_(changes, since, last) : 2;
+  if (start > last) return { ok: true, records: [], next: since, more: false };
+  const count = Math.min(PULL_LIMIT, last - start + 1);
+  const list = changes.getRange(start, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
   const want = [];
   const seen = {};
   list.forEach(function (c, i) {
     const table = String(c[1]);
-    if (!forMain && (table === 'audit_log' || String(c[4]) === String(deviceId))) return;
+    if (!forMain && String(c[4]) === String(deviceId)) return;
+    if (!forMain && table === 'audit_log' && !who.admin) return;
     const id = table + '|' + c[2];
     if (seen[id]) return;
     seen[id] = true;
@@ -761,22 +936,26 @@ function pull_(since, deviceId, forMain) {
   const byTable = {};
   want.forEach(function (w) { (byTable[w.table] = byTable[w.table] || []).push(w.rowNo); });
   const rows = {};
-  Object.keys(byTable).forEach(function (t) { rows[t] = rowsAt_(sheet_('T_' + t, TABLE_HEADER), byTable[t]); });
+  Object.keys(byTable).forEach(function (t) { const sh = data_().getSheetByName('T_' + t); rows[t] = sh ? rowsAt_(sh, byTable[t]) : {}; });
   const out = [];
   let size = 0;
   let used = count;
   for (let k = 0; k < want.length; k++) {
     const w = want[k];
     const row = rows[w.table][w.rowNo];
-    if (!row) continue;
+    if (!row || String(row[0]) !== String(list[w.i][2])) continue; // compacted / moved: the newest copy comes with its own change
     if (size > PULL_MAX_CHARS && out.length) { used = w.i; break; } // the rest comes in the next page
     size += String(row[4] || '').length;
     let parsed = {};
     try { parsed = JSON.parse(row[4]); } catch (e) { parsed = {}; }
-    out.push({ t: w.table, k: String(row[0]), u: String(row[1]), d: String(row[2]), row: parsed });
+    const vby = parsed && parsed._vby ? parsed._vby : null;
+    if (parsed) delete parsed._vby;
+    const rec = { t: w.table, k: String(row[0]), u: String(row[1]), d: String(row[2]), row: forDevice_(w.table, parsed, String(row[0]), who) };
+    if (vby) rec.vby = vby;
+    out.push(rec);
   }
-  const next = since + used;
-  return { ok: true, records: out, next: next, more: next < total };
+  const next = used > 0 ? Number(list[used - 1][0]) || since : since;
+  return { ok: true, records: out, next: next, more: start + used <= last };
 }
 
 // ================================================================ devices & invites
@@ -786,7 +965,8 @@ function devices_() {
     const c = all[String(r[0])] || {};
     return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8],
       until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
-      attempts: c.attempts || [], waitingCmds: (c.cmds || []).length, wipe: c.wipe || null, lastLog: c.lastLog || null };
+      attempts: c.attempts || [], waitingCmds: (c.cmds || []).length, wipe: c.wipe || null, lastLog: c.lastLog || null,
+      admin: isAdminDevice_(String(r[0]), /cloud key/.test(String(r[9] || ''))), adminMarked: !!c.admin, signs: c.signs || null };
   });
 }
 function findDevice_(match) {
@@ -811,29 +991,87 @@ function touchDevice_(body, deviceId, extra) {
 }
 
 // Every request (except join and the main software) must come from a linked, unblocked device.
+// 1.0.0 build 1 (script 12): a device proves who it is by SIGNING the request with its device pass (sig, see sign_);
+// the pass itself no longer travels once the device knows the cloud is version 12. Old apps (no sig) still work until
+// they update – unless the owner switched on "every device must sign" (STRICT_SIGN) – and a device that signed once may
+// never send an unsigned request again. Unknown devices, removed devices and wrong passes are refused. A new device
+// holding the cloud key waits for the owner when another device already uses the key.
 function auth_(body) {
   const deviceId = String((body.device && body.device.id) || '');
-  if (body.token) {
-    const h = sha_(body.token);
-    const d = findDevice_(function (r) { return String(r[4]) === h; });
-    if (!d) { noteAttemptByToken_(h); return { ok: false, removed: true, error: 'This device is not linked any more. Link it again from another device (Admin › Devices).' }; }
-    if (d.v[3] === 'blocked') noteAttempt_(String(d.v[0]), 'blocked');
-    if (d.v[3] === 'blocked') return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' };
+  const strict = PropertiesService.getScriptProperties().getProperty('STRICT_SIGN') === '1';
+  if (body.token || (body.sig && !body.key)) {
+    let d = null;
+    if (body.token) {
+      const h = sha_(body.token);
+      d = findDevice_(function (r) { return String(r[4]) === h; });
+      if (!d) { noteAttemptByToken_(h); return { ok: false, removed: true, error: 'This device is not linked any more. Link it again from another device (Admin › Devices).' }; }
+    } else {
+      d = deviceId ? findDevice_(function (r) { return String(r[0]) === deviceId; }) : null;
+      if (!d) { log_('Refused', [deviceId, 'unknown device']); return { ok: false, removed: true, error: 'This device is not known to the cloud. Link it again from another device (Admin › Devices).' }; }
+      if (d.v[3] === 'removed' || !String(d.v[4] || '')) { noteAttempt_(String(d.v[0]), 'removed'); return { ok: false, removed: true, error: 'This device was removed by the owner. Link it again.' }; }
+    }
+    const id = String(d.v[0]);
+    if (d.v[3] === 'blocked') { noteAttempt_(id, 'blocked'); return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' }; }
     if (d.v[3] === 'waiting') return { ok: false, waiting: true, error: 'Waiting for the owner to approve this device.' };
-    const g = gate_(String(d.v[0]), d);
+    const s = checkSig_(body, id, String(d.v[4]), strict);
+    if (s) { noteAttempt_(id, s.why); return s; }
+    const g = gate_(id, d);
     if (g) return g;
-    touchDevice_(body, String(d.v[0]));
-    return { ok: true, deviceId: String(d.v[0]) };
+    touchDevice_(body, id);
+    return { ok: true, deviceId: id, viaKey: false, admin: isAdminDevice_(id, false), signed: !!body.sig };
   }
-  if (!API_KEY || API_KEY.indexOf('PASTE') === 0) return { ok: false, error: 'The cloud key has not been set in the cloud program yet.' };
-  if (body.key !== API_KEY) return { ok: false, error: 'Wrong cloud key. Copy the key from the app into the cloud program.' };
+  const KEY = apiKey_();
+  if (!KEY || KEY.indexOf('PASTE') === 0) return { ok: false, error: 'The cloud key has not been set in the cloud program yet.' };
+  if (body.key !== KEY) return { ok: false, error: 'Wrong cloud key. Copy the key from the app into the cloud program.' };
   const id = deviceId || 'first-device';
   const d = findDevice_(function (r) { return String(r[0]) === id; });
   if (d && d.v[3] === 'blocked') { noteAttempt_(id, 'blocked'); return { ok: false, blocked: true, error: 'This device has been blocked by the owner.' }; }
   if (d && d.v[3] === 'removed') { noteAttempt_(id, 'removed'); return { ok: false, removed: true, error: 'This device was removed by the owner. Link it again.' }; }
+  if (d && d.v[3] === 'waiting') return { ok: false, waiting: true, error: 'Waiting for the owner to approve this device (it used the cloud key).' };
   if (d) { const g = gate_(id, d); if (g) return g; }
+  const s = checkSig_(body, id, sha_(KEY), strict);
+  if (s) { noteAttempt_(id, s.why); return s; }
+  if (!d) {
+    // The cloud key is not a pass for any number of new devices: the first device holding it is the main tablet;
+    // another new device with the key waits until the owner approves it (Admin › Devices).
+    const others = values_(sheet_('Devices', DEVICE_HEADER)).filter(function (r) { return /cloud key/.test(String(r[9] || '')) && String(r[3]) === 'active'; });
+    if (others.length) {
+      touchDevice_(body, id, { status: 'waiting', note: 'asked with the cloud key' });
+      log_('Refused', [id, 'new device with the cloud key – waiting for the owner']);
+      return { ok: false, waiting: true, error: 'A new device used the cloud key. The owner must approve it first (Admin › Devices on the main tablet).' };
+    }
+  }
   touchDevice_(body, id, { status: 'active', note: 'linked with the cloud key' });
-  return { ok: true, deviceId: id };
+  return { ok: true, deviceId: id, viaKey: true, admin: true, signed: !!body.sig };
+}
+
+// sig = sha256( sha256(pass) | device id | kind | sentAt | sha256(JSON of the records, or "null") ) – pass = the
+// device's own pass, or the cloud key on the main tablet. The cloud only keeps sha256(pass), all it needs to check.
+function sign_(passHash, deviceId, body) {
+  return sha_([passHash, deviceId, String(body.kind || ''), String(body.sentAt || ''), sha_(JSON.stringify(body.records || null))].join('|'));
+}
+function checkSig_(body, id, passHash, strict) {
+  const c = ctlAll_()[id] || {};
+  if (!body.sig) {
+    if (strict || !transition_()) return { ok: false, why: 'unsigned', error: 'Update the Easy Buys app on this device – the cloud now only accepts signed requests.' };
+    if (c.signs) return { ok: false, why: 'unsigned', error: 'This device signs its requests, but this one was not signed. Refused (it may not have come from the device).' };
+    return null;
+  }
+  if (!passHash || String(body.sig) !== sign_(passHash, id, body)) return { ok: false, why: 'bad signature', error: 'The request was not signed with this device\'s pass. Refused. Link the device again if this keeps happening.' };
+  const t = Date.parse(String(body.sentAt || '').replace(' ', 'T'));
+  if (!isFinite(t) || Math.abs(Date.now() - t) > 7 * 86400000) return { ok: false, why: 'old request', error: 'The request is too old, or the date on this device is wrong. Check the date and time on this device.' };
+  if (!c.signs) { const all = ctlAll_(); ctl_(all, id).signs = now_(); ctlSave_(all); }
+  return null;
+}
+
+// An "admin device": the main tablet (cloud key), a device the owner marked as an admin device in Admin › Devices, or a
+// device only owners / admins may log in on. Role and PIN changes, locked settings and device changes come only from these.
+function isAdminDevice_(id, viaKey) {
+  if (viaKey) return true;
+  const c = ctlAll_()[String(id)] || {};
+  if (c.admin) return true;
+  const roles = c.roles || [];
+  return roles.length > 0 && roles.every(function (r) { return r === 'owner' || r === 'admin'; });
 }
 
 function code_(n) {
@@ -854,12 +1092,14 @@ function inviteCreate_(body, who) {
   const email = String(body.email || '').trim();
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'That email address does not look right.' };
   const url = String(body.url || '');
-  sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), (body.by || '') + ' @ ' + who.deviceId, email, '', '']);
+  sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), esc_((body.by || '') + ' @ ' + who.deviceId), email, '', '']);
+  // 1.0.0 build 1: an invite for the owner's / an admin's own phone makes it an admin device when it joins.
+  if (body.adminDevice) { const p = props_(); let l = []; try { l = JSON.parse(p.getProperty('INVITE_ADMIN') || '[]'); } catch (e) { l = []; } p.setProperty('INVITE_ADMIN', JSON.stringify(l.concat([code]).slice(-20))); }
   const link = linkCode_(url, code);
   let emailed = false;
   if (email) {
     const tap = linkUrl_(url, link);
-    MailApp.sendEmail({
+    mail_({
       to: email, name: 'Easy Buys',
       subject: 'Link your device to Easy Buys',
       htmlBody: '<p>Bula! ' + (body.by || 'The owner') + ' invited this device to the Easy Buys app.</p>'
@@ -874,27 +1114,45 @@ function inviteCreate_(body, who) {
 }
 
 // New device: swap the invite for its own access token.
+// 1.0.0 build 1: wrong codes are limited (30 an hour for everyone, then joining waits an hour); a device id already
+// linked cannot be taken over; new devices wait for the owner's approval unless the owner switched approval off.
 function join_(body) {
-  return withLock_(function () {
-    const code = String(body.invite || '').trim().toUpperCase();
+  const code = String(body.invite || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{6,12}$/.test(code)) return { ok: false, error: 'Invite not found. Ask for a new one.' };
+  const hour = new Date().toISOString().slice(0, 13);
+  const cache = typeof CacheService !== 'undefined' ? CacheService.getScriptCache() : null;
+  const bad = cache ? Number(cache.get('join_bad_' + hour) || '0') : 0;
+  if (bad >= 30) return { ok: false, error: 'Too many wrong invite codes – try again in an hour.' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, error: 'Busy – try again in a moment.' };
+  try {
     const sh = sheet_('Invites', INVITE_HEADER);
     const rows = values_(sh);
     let row = -1;
     for (let i = 0; i < rows.length; i++) if (String(rows[i][0]) === code) row = i;
-    if (row < 0) return { ok: false, error: 'Invite not found. Ask for a new one.' };
+    if (row < 0) {
+      if (cache) cache.put('join_bad_' + hour, String(bad + 1), 3700);
+      if (bad + 1 === 10) secEvent_('invite_guess', { device: String((body.device && body.device.id) || ''), what: '10 wrong invite codes within the hour' });
+      return { ok: false, error: 'Invite not found. Ask for a new one.' };
+    }
     const inv = rows[row];
     if (inv[5]) return { ok: false, error: 'This invite has already been used. Ask for a new one.' };
     if (new Date(inv[2]).getTime() < Date.now()) return { ok: false, error: 'This invite has expired. Ask for a new one.' };
     const d = body.device || {};
-    if (!d.id) return { ok: false, error: 'Device id missing.' };
+    if (!d.id || !/^[A-Za-z0-9._:-]{3,80}$/.test(String(d.id))) return { ok: false, error: 'Device id missing.' };
     const token = Utilities.getUuid() + Utilities.getUuid();
-    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') === '1';
+    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
     const existing = findDevice_(function (r) { return String(r[0]) === String(d.id); });
+    if (existing && String(existing.v[3]) !== 'removed' && String(existing.v[4] || '')) { log_('Refused', [String(d.id), 'join with a device id already linked']); return { ok: false, error: 'A device with this id is already linked. Remove the old one first (Admin › Devices).' }; }
     if (existing) existing.sh.getRange(existing.row, 4, 1, 2).setValues([[approval ? 'waiting' : 'active', sha_(token)]]);
     else touchDevice_(body, String(d.id), { status: approval ? 'waiting' : 'active', tokenHash: sha_(token), invitedBy: inv[3], note: 'invite ' + code });
     sh.getRange(row + 2, 6, 1, 2).setValues([[now_(), String(d.id)]]);
-    return { ok: true, token: token, approved: !approval };
-  });
+    let adminList = [];
+    try { adminList = JSON.parse(props_().getProperty('INVITE_ADMIN') || '[]'); } catch (e) { adminList = []; }
+    if (adminList.indexOf(code) >= 0) { const all = ctlAll_(); const c = ctl_(all, String(d.id)); c.admin = true; hist_(c, 'Joined as an admin device (owner\'s invite)', inv[3]); ctlSave_(all); }
+    secEvent_('device', { device: String(d.name || d.id), what: 'A new device joined with an invite' + (approval ? ' – it waits for your approval' : '') + (adminList.indexOf(code) >= 0 ? ' (as an admin device)' : ''), refused: false });
+    return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0 };
+  } finally { lock.releaseLock(); }
 }
 
 function deviceStatus_(id, status, who) {
@@ -948,12 +1206,17 @@ function gate_(id, d) {
 function devicePulled_(id, body, out) {
   const all = ctlAll_(); const c = ctl_(all, id);
   if (body.stat) c.stat = { at: now_(), pending: body.stat.pending, health: body.stat.health || null, backup: body.stat.backup || null, login: body.stat.login || null };
+  // 1.0.0 build 1: a device clock an hour or more out, or a time zone that is not Fiji's, may be tampering.
+  // 1.0.0 hardening: more than 5 minutes out (the app stops money work then), or a time zone that is not Fiji
+  if (body.stat && ((Math.abs(Number(body.stat.clockSkewMin) || 0) > 5) || (body.stat.tz && !/Fiji|^\+1[23]|^UTC\+12/.test(String(body.stat.tz))))) {
+    secEvent_('clock', { device: String(c.name || id), what: 'Clock ' + (Number(body.stat.clockSkewMin) || 0) + ' minutes from Google\'s time; time zone ' + String(body.stat.tz || 'not said'), refused: false });
+  }
   out.control = { shop: c.shop || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
   out.commands = c.cmds || [];
   c.cmds = [];
   ctlSave_(all);
 }
-const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe'];
+const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin'];
 function deviceControl_(body, who) {
   return withLock_(function () {
     const id = String(body.id || '');
@@ -976,8 +1239,10 @@ function deviceControl_(body, who) {
     else if (a === 'roles') { c.roles = (body.roles || []).map(String); hist_(c, c.roles.length ? 'Only these roles may log in: ' + c.roles.join(', ') : 'Every role may log in', by); }
     else if (a === 'end') { const e = String(body.endDate || ''); if (e && !/^\d{4}-\d{2}-\d{2}$/.test(e)) return { ok: false, error: 'Choose the last day.' }; c.endDate = e || null; hist_(c, e ? 'Access ends after ' + e : 'No end date', by); }
     else if (a === 'wipe') { c.wipe = 'pending'; hist_(c, 'Wipe asked (on its next contact)', by); }
+    else if (a === 'admin') { c.admin = !!body.on; hist_(c, c.admin ? 'Marked as an admin device (roles, PINs and locked settings may be changed on it)' : 'No longer an admin device', by); }
     else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
     ctlSave_(all);
+    if (['wipe', 'remove', 'block', 'allow', 'admin'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
     return { ok: true, devices: devices_() };
   });
 }
@@ -997,13 +1262,22 @@ function problemLogGet_(id) {
 function cloudSettings_(body) {
   const props = PropertiesService.getScriptProperties();
   if (body.requireApproval === true || body.requireApproval === false) props.setProperty('REQUIRE_APPROVAL', body.requireApproval ? '1' : '0');
-  return { ok: true, requireApproval: props.getProperty('REQUIRE_APPROVAL') === '1' };
+  // 1.0.0 build 1: once every device runs the new app, the owner switches on "every device must sign".
+  if (body.strictSign === true || body.strictSign === false) props.setProperty('STRICT_SIGN', body.strictSign ? '1' : '0');
+  if (body.linkCutover === true || body.linkCutover === false) props.setProperty('LINK_CUTOVER', body.linkCutover ? '1' : '0');
+  return { ok: true, requireApproval: props.getProperty('REQUIRE_APPROVAL') !== '0', strictSign: props.getProperty('STRICT_SIGN') === '1', linkCutover: props.getProperty('LINK_CUTOVER') === '1' };
 }
 
 // ================================================================ main Easy Buys software
 function mainApi_(body) {
   const key = PropertiesService.getScriptProperties().getProperty('MAIN_KEY');
   if (!key || body.key !== key) return { ok: false, error: 'Not allowed' };
+  // 1.0.0 build 1: once every till PC has its own key (the owner pressed "Till keys done" – LINK_CUTOVER), the old Links'
+  // main_push / main_link_check with the shared key are refused, and the owner is told.
+  if (props_().getProperty('LINK_CUTOVER') === '1' && (body.kind === 'main_push' || body.kind === 'main_link_check')) {
+    secEvent_('link_key', { device: 'till PC ' + String(body.source || '?'), what: 'An old Link used the shared main key after the cut-over' });
+    return { ok: false, error: 'Not allowed – this till PC needs its own till key (Aronium › Till PCs › Till key).' };
+  }
   PropertiesService.getScriptProperties().setProperty('LAST_MAIN_SYNC', now_());
   if (body.kind === 'main_pull') return pull_(Number(body.since) || 0, 'main', MAIN_TABLES_PULL_ALL);
   if (body.kind === 'main_push') return push_(body.records || [], 'main');
@@ -1040,6 +1314,7 @@ function setup() {
   if (!props.getProperty('MAIN_KEY')) props.setProperty('MAIN_KEY', Utilities.getUuid() + Utilities.getUuid());
   data_();
   ['Changes', 'Devices', 'Invites'].forEach(function (n) { sheet_(n, n === 'Changes' ? CHANGES_HEADER : n === 'Devices' ? DEVICE_HEADER : INVITE_HEADER); });
+  securityDigestTrigger_(); // 1.0.0 build 1: the daily security summary at 7:00 am Fiji time
   Logger.log('Cloud folder: ' + root_().getUrl());
   Logger.log('Data spreadsheet: ' + data_().getUrl());
   Logger.log('Main-software key (keep private): ' + props.getProperty('MAIN_KEY'));
@@ -1054,7 +1329,7 @@ function requireApprovalOff() { PropertiesService.getScriptProperties().setPrope
 // the change list keeps working (old entries just point at nothing), and records from before the fresh start that a
 // device still had waiting are refused when they arrive. Test photos and documents move to a "Test data" folder.
 function freshStart_(body) {
-  if (!body.key || body.key !== API_KEY) return { ok: false, error: 'Start fresh only from the main tablet (the one holding the cloud key).' };
+  if (!body.key || body.key !== apiKey_()) return { ok: false, error: 'Start fresh only from the main tablet (the one holding the cloud key).' };
   const tables = (body.tables || []).filter(function (t) { return /^[a-z_0-9]+$/.test(t); });
   const at = String(body.at || '');
   if (!tables.length || !at) return { ok: false, error: 'Nothing to clear.' };
@@ -1256,11 +1531,14 @@ function fileGet_(body, who) {
   const row = fileRow_(id);
   let file;
   try { file = DriveApp.getFileById(id); file.getName(); } catch (e) { return { ok: false, error: 'This file is no longer in Google Drive.' }; }
-  if (!row && !insideFolder_(file, path_(['Documents']).getId(), 5)) return { ok: false, error: 'Not an Easy Buys document.' };
+  // 1.0.0 (stream C) photos (invoices, cheques, deposit slips…) live in Photos › month › type: Today fetches them when the phone's copy was cleared
+  if (!row && !insideFolder_(file, path_(['Documents']).getId(), 5) && !insideFolder_(file, path_(['Photos']).getId(), 4)) return { ok: false, error: 'Not an Easy Buys document.' };
   const legacy = row ? null : legacyDocType_(id);
   const type = row ? String(row[6] || '') : legacy ? legacy.type : '';
   const access = row ? String(row[7] || 'normal') : legacy ? legacy.access : 'normal';
-  const allowed = docAllowed_(body.user, type, access, !row);
+  // 1.0.0 build 1: the person is the one the cloud checked (their session), not whoever the device says is logged in.
+  // Without a session (old apps) a restricted file is never given.
+  const allowed = docAllowed_(who.user ? { uid: who.user.uid } : null, type, access, !row);
   if (!allowed.ok) { log_('Refused', [who.deviceId, body.user ? body.user.uid : '(old app)', id, type, allowed.error]); return allowed; }
   const bytes = file.getBlob().getBytes();
   return { ok: true, data: Utilities.base64Encode(bytes), mime: file.getMimeType(), name: file.getName(), size: bytes.length, sha256: bytesSha_(bytes) };
@@ -1588,4 +1866,658 @@ function fcccLpg_() {
   try { text = ocr_(Utilities.newBlob(bytes, 'application/pdf', 'fccc-lpg.pdf')); } catch (e) { text = ''; }
   if (text) return { ok: true, effective: n.effective, url: n.url, text: String(text).slice(0, 60000), engine: 'ocr' };
   return { ok: false, code: 'NOT_READ', error: 'NOT_READ: the ' + n.effective + ' authorisation could not be read' + (ai.error ? ' (' + String(ai.error).slice(0, 150) + ')' : '') + '.' };
+}
+
+// ================================================================ 1.0.0 build 1 (script 12): security
+// The cloud no longer trusts a device blindly (security audit C1–C4, H3, H5, H6, M1–M3):
+//  • every request is signed with the device's pass (auth_ / checkSig_ above);
+//  • the PERSON is checked too: logging in with a PIN on a device asks the cloud for a session (user_login). Owner /
+//    admin work (locked records and settings, device control, invites, backups, calendar, Viber, Start clean…) needs an
+//    owner / admin session from that device – a device alone is not enough;
+//  • PINs: PBKDF2 with a salt per person (p2:…); in the data spreadsheet the hash is also locked with a secret only the
+//    cloud holds (PIN_PEPPER); the "proof" a device sends at login is checked against a value kept only in Script
+//    properties; owner / admin PIN hashes, bank details and face data are not sent to devices that do not need them;
+//  • the change history (audit_log) can only be added to, with a running fingerprint, and goes to admin devices;
+//  • times in the future are refused; only known tables are accepted (devices cannot make new sheets);
+//  • old apps keep working for 7 days after this script is installed, or until the owner presses "All phones updated".
+const PIN_ITER = 2000;
+const PIN_TOP_ROLES = ['owner', 'admin', 'manager', 'payroll'];
+const BOSS_ROLES = ['owner', 'admin'];
+const USER_LOCKED_COLS = ['role', 'pin_hash', 'perms', 'permissions', 'works_shifts', 'own_till', 'active', 'email'];
+// Locked settings (the same list as src/services/locked.js LOCKED_SHARED – tests/cloud12.test.js keeps the two the same).
+const LOCKED_SHARED = ['role_perms', 'locked_admin_ok', 'modules_on', 'update_repo', 'go_live', 'gl_lock', 'gl_map', 'acct_settings', 'ap_rules',
+  'pay_rules', 'pay_cycle', 'pay_signoff_rules', 'tax_calendar_rules', 'employer_details', 'till_rules', 'cig_tally', 'owed_rules',
+  'viber_channels', 'doc_settings', 'main_tablet_device', 'fresh_start', 'clean_start', 'link_settings', 'ai_settings', 'backup_settings',
+  'email_prefs', 'doc_visibility', 'watchdog', 'email_logins'];
+// Settings where only some fields are locked (src/services/locked.js LOCKED_FIELDS).
+const LOCKED_FIELDS = { go_live: ['liveFrom', 'freshFrom'] };
+const LOCKED_TABLES = { users: 'cols', shops: '*', tills: '*', gl_accounts: '*', bin_records: '*', bin_parts: '*', pay_profiles: '*',
+  ap_suppliers: ['bank_name', 'bank_account'], gl_journals: 'opening' };
+// The tables the app syncs (src/services/records.js SYNC_TABLES – a test keeps this list complete). Anything else is refused,
+// so a device cannot fill the spreadsheet with sheets of its own.
+const KNOWN_TABLES = ['aronium_refunds', 'shift_ends', 'handover_notes', 'verify_trail', 'cheque_steps', 'deposit_plans', 'users', 'shops', 'shared_settings', 'punches', 'timesheet_checks', 'leave_types', 'leave_entitlements', 'leave_requests', 'rosters',
+  'ap_suppliers', 'ap_invoices', 'ap_payments', 'ap_allocations', 'bank_accounts', 'cheque_books', 'cheques', 'bank_entries', 'ap_recurring', 'loan_entries',
+  'tills', 'till_counts', 'cash_moves', 'deposits', 'bank_statements', 'bank_lines', 'pay_profiles', 'staff_debts', 'staff_charges', 'pay_runs', 'pay_lines',
+  'inv_items', 'inv_item_shops', 'inv_moves', 'inv_cost_changes', 'po_orders', 'po_lines', 'inv_receipts', 'inv_counts', 'inv_transfers', 'inv_count_lines',
+  'inv_count_areas', 'verifications', 'money_snaps', 'alert_log', 'safe_counts', 'supplier_statements', 'gl_accounts', 'gl_journals', 'fixed_assets',
+  'gl_budgets', 'aronium_batches', 'gl_recurring', 'gl_year_close', 'stat_payments', 'roster_shifts', 'job_openings', 'applicants', 'onboarding',
+  'signatures', 'contracts', 'pay_signoffs', 'documents', 'licences', 'licence_events', 'bank_checks', 'wallets', 'wallet_moves', 'wallet_imports',
+  'wallet_lines', 'wallet_shift_notes', 'bank_closings', 'po_versions', 'supplier_schedules', 'aronium_suppliers', 'supplier_layouts', 'invoice_reads',
+  'till_shifts', 'aronium_eods', 'till_shortages', 'staff_credit_imports', 'staff_credit_balances', 'credit_settlements', 'regular_terms',
+  'regular_receipts', 'loan_statements', 'loan_recons', 'owner_moves', 'personal_regulars', 'pay_slip_status', 'tax_proofs', 'staff_details',
+  'roster_changes', 'myday_items', 'myday_marks', 'issued_docs', 've_items', 've_due', 've_work', 've_faults', 've_fuel', 've_checks',
+  'accountant_queries', 'tax_returns', 'tax_return_versions', 'till_surplus', 'cheque_cover', 'handovers', 'fccc_lists', 'inv_count_entries',
+  'inv_item_suppliers', 'aronium_feed', 'duty_lists', 'duty_runs', 'roster_marks', 'verify_queries', 'shop_accounts', 'bin_records', 'bin_parts',
+  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log',
+  // tables the main software or older apps may still send
+  'suppliers', 'materials', 'products', 'recipes', 'equipment', 'checklists', 'checklist_items', 'shift_names', 'steps', 'product_steps', 'product_decks',
+  'safe_counts', 'shop_profiles', 'notifications', 'messages', 'stock_takes', 'handover_notes'];
+
+function props_() { return PropertiesService.getScriptProperties(); }
+function secret_(name) {
+  const p = props_();
+  let s = p.getProperty(name);
+  if (!s) { s = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, ''); p.setProperty(name, s); }
+  return s;
+}
+// The day this script (12) first ran: old apps are accepted for 7 days after it, or until "All phones updated".
+function transition_() {
+  const p = props_();
+  if (p.getProperty('STRICT_SIGN') === '1') return false;
+  let since = Number(p.getProperty('V12_SINCE') || '0');
+  if (!since) { since = Date.now(); p.setProperty('V12_SINCE', String(since)); }
+  return Date.now() - since < 7 * 86400000;
+}
+function bytesOf_(s) { return Utilities.newBlob(String(s)).getBytes ? Utilities.newBlob(String(s)).getBytes() : Array.from(Utilities.base64Decode(Utilities.base64Encode(String(s)))); }
+function hexOf_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
+// PBKDF2-HMAC-SHA256, one 32-byte block (the same as src/services/pins.js).
+function pbkdf2_(password, salt, iter) {
+  const key = bytesOf_(password);
+  let u = Utilities.computeHmacSha256Signature(bytesOf_(salt).concat([0, 0, 0, 1]), key);
+  const t = u.slice();
+  for (let i = 1; i < iter; i++) {
+    u = Utilities.computeHmacSha256Signature(u, key);
+    for (let j = 0; j < t.length; j++) t[j] ^= u[j];
+  }
+  return hexOf_(t);
+}
+function pinSalt_(offered) {
+  const p = props_();
+  let s = p.getProperty('PIN_SALT');
+  if (!s) {
+    const o = String(offered || '');
+    s = /^[A-Za-z0-9-]{16,80}$/.test(o) ? o : Utilities.getUuid() + Utilities.getUuid();
+    p.setProperty('PIN_SALT', s);
+  }
+  return s;
+}
+// p2:<length>:<tag>:<salt>:<iterations>:<hash>. tag = one hex letter (so a PIN pad finds the few people it may be).
+function pinHash_(pin) {
+  const p = String(pin === undefined || pin === null ? '' : pin).trim();
+  if (!/^\d{4,6}$/.test(p)) return null;
+  const tag = sha_(pinSalt_() + ':' + p).charAt(0);
+  const salt = sha_(Utilities.getUuid()).slice(0, 16);
+  return 'p2:' + p.length + ':' + tag + ':' + salt + ':' + PIN_ITER + ':' + pbkdf2_(p, salt, PIN_ITER);
+}
+// What a device sends at login (it never keeps it): PBKDF2 of the PIN with a different salt. The cloud keeps only
+// sha256(pepper + proof), in Script properties (not the spreadsheet, not on any device).
+function pinProof_(pin, uid) { return pbkdf2_(String(pin), 'proof|' + uid + '|' + pinSalt_(), PIN_ITER); }
+function proofKeep_(uid, proof) { if (/^[0-9a-f]{64}$/.test(String(proof || ''))) props_().setProperty('PV_' + uid, sha_(secret_('PIN_PEPPER') + ':' + proof)); }
+function proofOk_(uid, proof) { const v = props_().getProperty('PV_' + uid); return !!v && /^[0-9a-f]{64}$/.test(String(proof || '')) && v === sha_(secret_('PIN_PEPPER') + ':' + proof); }
+// In the spreadsheet a PIN hash is also locked with the pepper (x1:…), so a copy of the spreadsheet alone is not enough to
+// try PINs. Devices get it back unlocked (only those that may have it).
+function keystream_(uid, n) { let out = []; let i = 0; while (out.length < n) { const h = sha_(secret_('PIN_PEPPER') + '|' + uid + '|' + i); for (let j = 0; j < h.length; j += 2) out.push(parseInt(h.substr(j, 2), 16)); i++; } return out.slice(0, n); }
+function lockHash_(uid, h) { if (!h || /^x1:/.test(h)) return h || null; const b = String(h).split('').map(function (c) { return c.charCodeAt(0); }); const k = keystream_(uid, b.length); return 'x1:' + hexOf_(b.map(function (x, i) { return x ^ k[i]; })); }
+function unlockHash_(uid, x) {
+  if (!x || !/^x1:[0-9a-f]+$/.test(x)) return x || null;
+  const hex = x.slice(3); const b = []; for (let i = 0; i < hex.length; i += 2) b.push(parseInt(hex.substr(i, 2), 16));
+  const k = keystream_(uid, b.length);
+  return b.map(function (v, i) { return String.fromCharCode(v ^ k[i]); }).join('');
+}
+// A users record on its way into the spreadsheet: a plain PIN (old apps) becomes its hash and proof, then is dropped; a
+// proof sent with a new PIN (_proof) is kept in Script properties only when allowed; the hash is locked with the pepper.
+function hashUserRow_(row, uid, mayProof) {
+  const out = {};
+  Object.keys(row || {}).forEach(function (k) { out[k] = row[k]; });
+  if (out.pin !== undefined && out.pin !== null && String(out.pin) !== '') {
+    if (!out.pin_hash) out.pin_hash = pinHash_(out.pin);
+    if (mayProof) proofKeep_(uid, pinProof_(out.pin, uid));
+  }
+  if (out._proof && mayProof) proofKeep_(uid, out._proof);
+  delete out.pin; delete out._proof; delete out._vby;
+  if (out.pin_hash) out.pin_hash = lockHash_(uid, out.pin_hash);
+  return out;
+}
+// Once: every plain PIN already in the cloud copy is hashed and removed (old apps sent them plain).
+function migratePins_() {
+  const p = props_();
+  if (p.getProperty('PINS_HASHED') === '2') return 0;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return 0;
+  try {
+    const sh = data_().getSheetByName('T_users');
+    let n = 0;
+    if (sh && sh.getLastRow() >= 2) {
+      values_(sh).forEach(function (r, i) {
+        let row = null;
+        try { row = JSON.parse(r[4] || '{}'); } catch (e) { return; }
+        if (!row || (row.pin === undefined && (!row.pin_hash || /^x1:/.test(row.pin_hash)))) return;
+        sh.getRange(i + 2, 5, 1, 1).setValues([[JSON.stringify(hashUserRow_(row, String(r[0]), true))]]);
+        n += 1;
+      });
+    }
+    p.setProperty('PINS_HASHED', '2');
+    if (n) log_('PINs hashed', [n]);
+    // Records of the locked kinds already in the cloud before script 12 count as the owner's (they were made by the
+    // business before the change): marked once so a device linked later still takes them.
+    if (p.getProperty('VBY_MARKED') !== '1') {
+      ['users', 'shared_settings'].concat(Object.keys(LOCKED_TABLES)).forEach(function (t) {
+        const s2 = data_().getSheetByName('T_' + t);
+        if (!s2 || s2.getLastRow() < 2) return;
+        const vals = s2.getRange(2, 5, s2.getLastRow() - 1, 1).getValues();
+        let changed = false;
+        vals.forEach(function (v) { try { const row = JSON.parse(text_(v[0]) || '{}'); if (row && !row._vby) { row._vby = { uid: 'before-1.0', role: 'owner' }; v[0] = JSON.stringify(row); changed = true; } } catch (e) { /* leave it */ } });
+        if (changed) s2.getRange(2, 5, vals.length, 1).setValues(vals);
+      });
+      p.setProperty('VBY_MARKED', '1');
+    }
+    return n;
+  } finally { lock.releaseLock(); }
+}
+function hashPins() { props_().deleteProperty('PINS_HASHED'); Logger.log('PINs hashed: ' + migratePins_()); }
+
+function cloudUser_(uid) {
+  const sh = data_().getSheetByName('T_users');
+  if (!sh || !uid) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) !== String(uid)) continue;
+    try { const u = JSON.parse(rows[i][4] || '{}'); u.uid = String(rows[i][0]); return u; } catch (e) { return null; }
+  }
+  return null;
+}
+function anyBossProof_() {
+  const sh = data_().getSheetByName('T_users');
+  if (!sh) return false;
+  return values_(sh).some(function (r) { try { const u = JSON.parse(r[4] || '{}'); return BOSS_ROLES.indexOf(String(u.role)) >= 0 && String(u.active) !== '0' && !!props_().getProperty('PV_' + r[0]); } catch (e) { return false; } });
+}
+
+// ---------------------------------------------------------------- sessions: the person, checked by the cloud
+function sessionsAll_() { try { return JSON.parse(props_().getProperty('SESSIONS') || '{}'); } catch (e) { return {}; } }
+function sessionsSave_(all) {
+  const now = Date.now();
+  Object.keys(all).forEach(function (k) { if (!(all[k].exp > now)) delete all[k]; });
+  props_().setProperty('SESSIONS', JSON.stringify(all));
+}
+// user_login: { uid, proof } → { ok, session, role, until }. 5 wrong tries for a person (or 20 from a device) lock for 15 minutes.
+function userLogin_(body, who) {
+  const uid = String(body.uid || '');
+  const p = props_();
+  let fails = {};
+  try { fails = JSON.parse(p.getProperty('LOGIN_FAILS') || '{}'); } catch (e) { fails = {}; }
+  const now = Date.now();
+  const fu = fails['u:' + uid] || { n: 0, until: 0 };
+  const fd = fails['d:' + who.deviceId] || { n: 0, until: 0 };
+  if (fu.until > now || fd.until > now) return { ok: false, locked: true, error: 'Too many wrong PINs – try again in 15 minutes.' };
+  const u = cloudUser_(uid);
+  const good = u && String(u.active) !== '0' && proofOk_(uid, body.proof);
+  if (!good) {
+    fu.n += 1; fd.n += 1;
+    if (fu.n >= 5) { fu.n = 0; fu.until = now + 15 * 60000; }
+    if (fd.n >= 20) { fd.n = 0; fd.until = now + 15 * 60000; }
+    fails['u:' + uid] = fu; fails['d:' + who.deviceId] = fd;
+    p.setProperty('LOGIN_FAILS', JSON.stringify(fails));
+    log_('Refused', [who.deviceId, 'user_login', uid, u ? 'wrong PIN' : 'unknown person']);
+    failCount_('pin', uid + '|' + who.deviceId, { device: who.deviceId, person: u ? String(u.name || uid) : uid, what: '5 wrong PINs in 10 minutes for this person on this device' });
+    if (u && !p.getProperty('PV_' + uid)) return { ok: false, noProof: true, error: 'This person\'s PIN has not reached the cloud yet.' };
+    return { ok: false, error: 'The cloud did not accept this PIN.' };
+  }
+  delete fails['u:' + uid]; delete fails['d:' + who.deviceId];
+  p.setProperty('LOGIN_FAILS', JSON.stringify(fails));
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  const all = sessionsAll_();
+  const until = now + 12 * 3600000;
+  all[sha_(token)] = { uid: uid, device: who.deviceId, exp: until };
+  sessionsSave_(all);
+  return { ok: true, session: token, role: String(u.role || ''), until: new Date(until).toISOString() };
+}
+// The person behind this request (from its session), with the role they have in the cloud NOW.
+function sessionUser_(body, who) {
+  if (!body || !body.session || !who) return null;
+  const s = sessionsAll_()[sha_(String(body.session))];
+  if (!s || !(s.exp > Date.now()) || s.device !== who.deviceId) return null;
+  const u = cloudUser_(s.uid);
+  if (!u || String(u.active) === '0') return null;
+  return { uid: s.uid, role: String(u.role || ''), name: String(u.name || '') };
+}
+function isBoss_(who) { return !!(who && who.user && BOSS_ROLES.indexOf(who.user.role) >= 0); }
+// Owner / admin work: an owner / admin session on this device. During the 7 days for old apps, an old app on an admin
+// device (one that does not sign yet) is still let through.
+function needOwner_(who, body, what) {
+  if (isBoss_(who)) return null;
+  if (transition_() && who && who.admin && !body.sig) return null;
+  log_('Refused', [who ? who.deviceId : '', what, who && who.user ? who.user.role : 'no owner login']);
+  return { ok: false, notAdmin: true, needLogin: true, error: what + ' needs the owner or admin to be logged in on this device (with the internet on).' };
+}
+function needAdmin_(who, what) { return needOwner_(who, {}, what); }
+
+// Why a pushed change is refused (null = allowed). boss: an owner / admin session; old: an old app during the 7 days.
+function lockedChange_(table, key, row, haveRow, boss, oldAdmin) {
+  if (boss) return null;
+  let before = null;
+  if (haveRow) { try { before = JSON.parse(haveRow[4] || 'null'); } catch (e) { before = null; } }
+  const same = function (a, b) { return String(a === undefined || a === null ? '' : a) === String(b === undefined || b === null ? '' : b); };
+  const changed = function (cols) {
+    if (!before) {
+      if (table === 'gl_accounts' && String(row.system) === '1') return false; // the app's own standard accounts
+      return cols === '*' ? true : cols.some(function (c) { return row[c] !== undefined && row[c] !== null && String(row[c]) !== '' && String(row[c]) !== '0'; });
+    }
+    const list = cols === '*' ? Object.keys(row).filter(function (c) { return ['updated_at', 'updated_device', '_vby'].indexOf(c) < 0; }) : cols;
+    return list.some(function (c) { return row[c] !== undefined && !same(row[c], before[c]); });
+  };
+  const LOGIN = 'needs the owner or admin to be logged in on the device that made it';
+  if (table === 'users') {
+    if (!before) return PIN_TOP_ROLES.indexOf(String(row.role || '')) >= 0 && !oldAdmin ? 'Adding an owner, admin, manager or payroll login ' + LOGIN + '.' : null;
+    const cols = USER_LOCKED_COLS.filter(function (c) {
+      if (row[c] === undefined) return false;
+      if (c === 'pin_hash') return !!row[c] && !same(unlockHash_(key, row[c]), unlockHash_(key, before[c]));
+      return !same(row[c], before[c]);
+    });
+    if (!cols.length) return null;
+    return oldAdmin && cols.every(function (c) { return c !== 'role' || BOSS_ROLES.indexOf(String(row.role)) < 0; }) ? null : 'Changing ' + cols.join(', ') + ' ' + LOGIN + '.';
+  }
+  if (oldAdmin) return null;
+  if (table === 'shared_settings') {
+    if (LOCKED_SHARED.indexOf(String(key)) < 0) return null;
+    if (before && same(row.value, before.value)) return null;
+    const lf = LOCKED_FIELDS[String(key)];
+    if (lf) {
+      const P = function (v) { try { const x = typeof v === 'string' ? JSON.parse(v) : v; return x && typeof x === 'object' ? x : {}; } catch (e) { return {}; } };
+      const a = P(before ? before.value : null); const b = P(row.value);
+      if (lf.every(function (k) { return same(a[k], b[k]); })) return null;
+    }
+    return 'This setting is locked – it ' + LOGIN + '.';
+  }
+  const spec = LOCKED_TABLES[table];
+  if (!spec) return null;
+  if (spec === 'opening') return String(row.kind || (before && before.kind) || '') === 'opening' && changed(['lines', 'jdate', 'status', 'kind']) ? 'Opening balances are locked – they ' + LOGIN + '.' : null;
+  return changed(spec) ? 'This is locked (' + table + ') – it ' + LOGIN + '.' : null;
+}
+
+// 1.0.0 build 1 (hardening, audit H2 / abuse C5): a money record dated in a closed month (on or before gl_lock) can
+// only be changed by an owner / admin session – the app refuses it too, this stops a phone that skips the app.
+const PERIOD_TABLES = /^(cash_moves|ap_invoices|ap_payments|ap_allocations|bank_entries|bank_lines|bank_closings|gl_journals|till_counts|till_shifts|till_shortages|till_surplus|aronium_eods|deposits|safe_counts|pay_runs|pay_lines|staff_charges|staff_debts|credit_settlements|wallet_moves|wallet_lines|loan_entries|loan_recons|owner_moves|cig_tallies|stat_payments|tax_returns|fixed_assets|cheques|regular_receipts|inv_moves|inv_receipts)$/;
+function rowDay_(r) {
+  if (!r) return '';
+  const k = ['move_date', 'invoice_date', 'pay_date', 'entry_date', 'jdate', 'shift_date', 'count_date', 'eod_date', 'z_date', 'line_date', 'run_date', 'deposit_date', 'charge_date', 'debt_date', 'settle_date', 'receipt_date', 'cheque_date', 'disposed_date', 'period_end', 'date'];
+  for (let i = 0; i < k.length; i++) if (r[k[i]] && /^\d{4}-\d{2}-\d{2}/.test(String(r[k[i]]))) return String(r[k[i]]).slice(0, 10);
+  return '';
+}
+function periodChange_(table, row, haveRow, boss, lockDay) {
+  if (boss || !lockDay || !PERIOD_TABLES.test(table)) return null;
+  let before = null;
+  if (haveRow) { try { before = JSON.parse(haveRow[4] || 'null'); } catch (e) { before = null; } }
+  const d1 = rowDay_(row); const d0 = rowDay_(before);
+  if ((d1 && d1 <= lockDay) || (d0 && d0 <= lockDay)) return 'The books are closed up to ' + lockDay + ' – a record dated in a closed month needs the owner or admin to be logged in.';
+  return null;
+}
+// 1.0.0 build 1 (hardening, abuse C10): a person tied to one shop (staff, supervisor, baker, shop manager) only
+// changes that shop's records. Owner / admin, and people with no shop (payroll …), are not limited here.
+function shopChange_(table, row, haveRow, boss, who) {
+  if (boss || !who || !who.user || table === 'users' || table === 'shared_settings' || table === 'audit_log') return null;
+  const u = cloudUser_(who.user.uid);
+  const mine = u && u.shop_code ? String(u.shop_code) : '';
+  if (!mine) return null;
+  let before = null;
+  if (haveRow) { try { before = JSON.parse(haveRow[4] || 'null'); } catch (e) { before = null; } }
+  const s1 = row && row.shop_code ? String(row.shop_code) : '';
+  const s0 = before && before.shop_code ? String(before.shop_code) : '';
+  if ((s1 && s1 !== mine) || (s0 && s0 !== mine)) return 'This record belongs to the other shop – only that shop, the owner or admin can change it.';
+  return null;
+}
+
+// ---------------------------------------------------------------- email logins (for the online version later)
+// Off until the owner switches "Email logins" on (locked setting email_logins). A login needs the person's email, the
+// password the owner set for them, and a 6-digit code sent to that email (5 minutes, 5 tries). Every answer is the same
+// whether the email exists or not; tries are limited per email and per caller (kept in the cache, not the settings).
+function emailOn_() { const v = sharedSetting_('email_logins'); return v === true || (v && v.on === true); }
+function caller_(body) { let k = ''; try { k = Session.getTemporaryActiveUserKey() || ''; } catch (e) { k = ''; } return sha_(k || String((body.device && body.device.id) || 'anyone')).slice(0, 20); }
+function userByEmail_(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return null;
+  const sh = data_().getSheetByName('T_users');
+  if (!sh) return null;
+  const rows = values_(sh);
+  for (let i = 0; i < rows.length; i++) { try { const u = JSON.parse(rows[i][4] || '{}'); if (String(u.email || '').trim().toLowerCase() === e) { u.uid = String(rows[i][0]); return u; } } catch (x) { /* next */ } }
+  return null;
+}
+function limited_(cache, key, max, secs) { const n = Number(cache.get(key) || '0'); if (n >= max) return true; cache.put(key, String(n + 1), secs); return false; }
+const EMAIL_SAME = 'If this email may log in, a code has been sent to it.';
+const EMAIL_FAIL = 'The email, password or code is not right (or the code is too old). Try again.';
+function emailLoginStart_(body) {
+  const cache = CacheService.getScriptCache();
+  const e = String(body.email || '').trim().toLowerCase();
+  if (limited_(cache, 'el_c_' + caller_(body), 10, 3600) || limited_(cache, 'el_e_' + sha_(e).slice(0, 20), 3, 900)) return { ok: true, message: EMAIL_SAME };
+  if (!emailOn_()) return { ok: true, message: EMAIL_SAME };
+  const u = userByEmail_(e);
+  if (!u || String(u.active) === '0' || !props_().getProperty('PW_' + u.uid)) return { ok: true, message: EMAIL_SAME };
+  const code = String(100000 + Math.floor(Math.random() * 900000));
+  cache.put('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
+  mailEssential_({ to: e, subject: 'Easy Buys login code', body: 'Your Easy Buys login code is ' + code + '. It works for 5 minutes. If you did not ask for it, tell the owner.', name: 'Easy Buys' });
+  return { ok: true, message: EMAIL_SAME };
+}
+function emailLoginFinish_(body) {
+  const cache = CacheService.getScriptCache();
+  const e = String(body.email || '').trim().toLowerCase();
+  const ck = 'el_code_' + sha_(e).slice(0, 20);
+  if (limited_(cache, 'el_f_' + caller_(body), 20, 3600)) return { ok: false, error: EMAIL_FAIL };
+  if (!emailOn_()) return { ok: false, error: EMAIL_FAIL };
+  let c = null;
+  try { c = JSON.parse(cache.get(ck) || 'null'); } catch (x) { c = null; }
+  if (!c || !(c.exp > Date.now()) || c.tries >= 5) { failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' }); return { ok: false, error: EMAIL_FAIL }; }
+  const u = userByEmail_(e);
+  const pw = u ? props_().getProperty('PW_' + u.uid) : null;
+  const codeOk = c.h === sha_(secret_('PIN_PEPPER') + ':' + String(body.code || '').trim());
+  let passOk = false;
+  if (pw) { const parts = pw.split(':'); passOk = parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(body.password || ''), parts[1], Number(parts[0]) || PIN_ITER) === parts[2]; }
+  if (!u || String(u.active) === '0' || !codeOk || !passOk) {
+    failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' });
+    c.tries += 1;
+    if (c.tries >= 5) cache.put(ck, 'null', 1); else cache.put(ck, JSON.stringify(c), Math.max(1, Math.round((c.exp - Date.now()) / 1000)));
+    return { ok: false, error: EMAIL_FAIL };
+  }
+  cache.put(ck, 'null', 1);
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  const all = sessionsAll_();
+  const until = Date.now() + 12 * 3600000;
+  all[sha_(token)] = { uid: u.uid, device: 'web:' + caller_(body), exp: until };
+  sessionsSave_(all);
+  log_('Email login', [u.uid, caller_(body)]);
+  return { ok: true, session: token, role: String(u.role || ''), until: new Date(until).toISOString() };
+}
+// The owner sets (or resets) a person's email-login password: the owner logged in AND their PIN typed again (proof).
+function emailPasswordSet_(body, who) {
+  if (!who.user || who.user.role !== 'owner' || !proofOk_(who.user.uid, body.ownerProof)) return { ok: false, error: 'The owner must be logged in and type their PIN again.' };
+  const u = cloudUser_(String(body.uid || ''));
+  if (!u) return { ok: false, error: 'This person has not reached the cloud yet.' };
+  const pw = String(body.password || '');
+  if (pw.length < 10) return { ok: false, error: 'The password must be at least 10 characters.' };
+  const salt = sha_(Utilities.getUuid()).slice(0, 16);
+  const iter = PIN_ITER * 5;
+  props_().setProperty('PW_' + u.uid, iter + ':' + salt + ':' + pbkdf2_(secret_('PIN_PEPPER') + ':' + pw, salt, iter));
+  log_('Email login', [u.uid, 'password set by the owner', who.deviceId]);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------- security alerts to the owner's email
+// Every security event goes into the SecurityLog sheet (add only, safe cells) and – at once, at most one email per kind
+// every 10 minutes (with how many more happened) – to the owner's address: Script properties › SECURITY_EMAIL, else the
+// support address (the owner's). A daily summary goes at 7:00 am Fiji time (securityDigest, its trigger is made by setup()).
+// A free Gmail account sends about 100 emails a day: 20 are always kept for the daily summary, crash reports and login
+// codes; when fewer are left, alerts (and reports, orders, packs) wait and are told in the next summary instead.
+const SEC_RESERVE = 20;
+const SEC_KINDS = {
+  refused: 'A request was refused', login_fail: 'Many wrong logins', invite_guess: 'Someone is guessing invite codes', link_key: 'A till PC key was misused',
+  link_event: 'Aronium Link warning', locked_change: 'A locked setting was changed', device: 'A device was added, removed, blocked or wiped',
+  clock: 'A device clock or time zone is wrong (not Fiji time, or more than 5 minutes out) – money work is stopped on it', backup: 'A backup was downloaded', clean_start: 'Start clean was used',
+};
+const SEC_TODO = {
+  refused: 'Nothing was changed. If you do not know this device, block it in Admin › Devices.',
+  login_fail: 'If it was not you or your staff, check who is near the tablet and change the PINs (Staff › the person › PIN).',
+  invite_guess: 'Joining is paused for an hour by itself. If it goes on, tell support.',
+  link_key: 'Nothing was accepted. Make a new key for that till PC (Admin › Aronium link) and check who used the PC.',
+  link_event: 'Check the till PC: the Aronium Link must keep running and read the real Aronium database.',
+  locked_change: 'If you did not make or allow this change, change your PIN and look at Admin › Change history.',
+  device: 'If you did not do this, block the device in Admin › Devices at once.',
+  clock: 'Check the date, time and time zone on that device (Settings › Date & time › automatic).',
+  backup: 'If you did not download it, change your PIN and check who can log in as owner or admin.',
+  clean_start: 'If you did not do this, call support now – the copy of everything is in Drive › Backups › Clean start.',
+};
+function fijiNow_() { return Utilities.formatDate(new Date(), 'Pacific/Fiji', 'yyyy-MM-dd HH:mm'); }
+function secEmail_() { return props_().getProperty('SECURITY_EMAIL') || SUPPORT_EMAIL; }
+function quotaLeft_() { try { return MailApp.getRemainingDailyQuota(); } catch (e) { return 0; } }
+// Every email of the cloud goes through here. essential: login codes, crash reports and the daily summary (they may use
+// the reserve). Returns true when sent; false when it had to wait (low quota) – noted for the summary.
+function mailEssential_(opts) { return mail_(opts, true); }
+function mail_(opts, essential) {
+  const left = quotaLeft_();
+  if (left <= 0 || (!essential && left <= SEC_RESERVE)) {
+    const p = props_();
+    const n = Number(p.getProperty('MAIL_HELD') || '0') + 1;
+    p.setProperty('MAIL_HELD', String(n));
+    try { sheet_('SecurityLog', SECLOG_HEADER).appendRow([fijiNow_(), 'mail_held', '', '', '', esc_('Not sent (daily email limit): ' + String(opts.subject || '').slice(0, 120)), '']); } catch (e) { /* next time */ }
+    return false;
+  }
+  MailApp.sendEmail(opts);
+  return true;
+}
+const SECLOG_HEADER = ['at_fiji', 'kind', 'device', 'person', 'shop', 'what', 'todo'];
+function secEvent_(kind, info) {
+  info = info || {};
+  try {
+    const row = [fijiNow_(), kind, esc_(String(info.device || '')), esc_(String(info.person || '')), esc_(String(info.shop || '')), esc_(String(info.what || '').slice(0, 1500)), esc_(SEC_TODO[kind] || '')];
+    sheet_('SecurityLog', SECLOG_HEADER).appendRow(row);
+  } catch (e) { /* the log never stops a request */ }
+  try {
+    const cache = CacheService.getScriptCache();
+    if (cache.get('sec_last_' + kind)) { cache.put('sec_cnt_' + kind, String(Number(cache.get('sec_cnt_' + kind) || '0') + 1), 3600); return false; }
+    const more = Number(cache.get('sec_cnt_' + kind) || '0');
+    const body = [
+      'Easy Buys security alert – ' + (SEC_KINDS[kind] || kind),
+      '',
+      'When (Fiji time): ' + fijiNow_(),
+      info.device ? 'Device: ' + info.device : '',
+      info.person ? 'Person: ' + info.person : '',
+      info.shop ? 'Shop: ' + info.shop : '',
+      'What happened: ' + String(info.what || ''),
+      info.refused === false ? '' : 'What the cloud did: refused it – nothing was changed.',
+      more ? 'The same happened ' + more + ' more time(s) since the last email.' : '',
+      '',
+      'What to do: ' + (SEC_TODO[kind] || 'Look at Admin › Change history.'),
+    ].filter(function (x) { return x !== ''; }).join('\n');
+    const sent = mail_({ to: secEmail_(), subject: 'Easy Buys security: ' + (SEC_KINDS[kind] || kind), body: body, name: 'Easy Buys' }, false);
+    if (sent) { cache.put('sec_last_' + kind, '1', 600); cache.put('sec_cnt_' + kind, '0', 3600); }
+    return sent;
+  } catch (e) { return false; }
+}
+// Counted problems that become an alert at 5 in 10 minutes (wrong PINs, email logins, dashboard passwords).
+function failCount_(kind, key, info) {
+  const cache = CacheService.getScriptCache();
+  const k = 'secf_' + kind + '_' + sha_(String(key)).slice(0, 12);
+  const n = Number(cache.get(k) || '0') + 1;
+  cache.put(k, String(n), 600);
+  if (n === 5) secEvent_('login_fail', info);
+}
+// The daily summary (7:00 am Fiji): every security event and crash report of the last 24 hours, or "all quiet".
+function securityDigest() {
+  const since = Utilities.formatDate(new Date(Date.now() - 86400000), 'Pacific/Fiji', 'yyyy-MM-dd HH:mm');
+  const ss = data_();
+  const sec = ss.getSheetByName('SecurityLog') ? values_(ss.getSheetByName('SecurityLog')).filter(function (r) { return String(r[0]) >= since; }) : [];
+  const crashes = ss.getSheetByName('Problem logs') ? values_(ss.getSheetByName('Problem logs')).filter(function (r) { return String(r[0]).replace('T', ' ').slice(0, 16) >= since; }) : [];
+  const held = Number(props_().getProperty('MAIL_HELD') || '0');
+  const lines = ['Easy Buys – security and problems in the last 24 hours (to ' + fijiNow_() + ' Fiji time)', ''];
+  if (!sec.length && !crashes.length && !held) lines.push('All quiet: no security events and no crash reports.');
+  if (sec.length) {
+    lines.push('Security events (' + sec.length + '):');
+    sec.slice(-60).forEach(function (r) { lines.push('• ' + r[0] + ' – ' + (SEC_KINDS[r[1]] || r[1]) + (r[2] ? ' – device ' + r[2] : '') + (r[3] ? ' – ' + r[3] : '') + ': ' + String(r[5]).slice(0, 200)); });
+  }
+  if (crashes.length) { lines.push(''); lines.push('Problem reports from devices (' + crashes.length + '):'); crashes.slice(-20).forEach(function (r) { lines.push('• ' + String(r[0]).slice(0, 16) + ' – device ' + r[1] + ': ' + String(r[2]).split('\n')[0].slice(0, 160)); }); }
+  if (held) lines.push('', held + ' email(s) were held back because the daily email limit was nearly used up – they are listed above or in the SecurityLog sheet.');
+  const sent = mail_({ to: secEmail_(), subject: 'Easy Buys daily security summary', body: lines.join('\n'), name: 'Easy Buys' }, true);
+  if (sent) props_().deleteProperty('MAIL_HELD');
+  return { ok: sent, events: sec.length, crashes: crashes.length };
+}
+function securityDigestTrigger_() {
+  try {
+    if (typeof ScriptApp === 'undefined') return false;
+    const have = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'securityDigest'; });
+    if (!have) ScriptApp.newTrigger('securityDigest').timeBased().atHour(7).everyDays(1).inTimezone('Pacific/Fiji').create();
+    return true;
+  } catch (e) { return false; }
+}
+
+// ---------------------------------------------------------------- the change history: add only, with a fingerprint
+function historyChain_(entries) {
+  if (!entries.length) return;
+  const p = props_();
+  let fp = p.getProperty('HIST_FP') || '';
+  const sh = sheet_('History chain', ['seq', 'key', 'fp', 'at']);
+  const rows = entries.map(function (e) { fp = sha_(fp + '|' + e.key + '|' + e.json); return [String(e.seq), esc_(e.key), fp, now_()]; });
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, 4).setValues(rows);
+  p.setProperty('HIST_FP', fp);
+}
+// Run from the editor: is the history unbroken? (every entry's fingerprint follows from the one before)
+function checkHistory() {
+  const ss = data_();
+  const t = ss.getSheetByName('T_audit_log'); const c = ss.getSheetByName('History chain');
+  if (!t || !c) return { ok: true, entries: 0 };
+  const byKey = {}; values_(t).forEach(function (r) { byKey[String(r[0])] = String(r[4]); });
+  let fp = ''; let bad = 0;
+  values_(c).forEach(function (r) { fp = sha_(fp + '|' + r[1] + '|' + (byKey[String(r[1])] || '')); if (fp !== String(r[2])) bad++; });
+  Logger.log(bad ? 'History CHANGED in ' + bad + ' place(s)' : 'History unbroken');
+  return { ok: !bad, bad: bad };
+}
+
+// ---------------------------------------------------------------- safe cells (no formulas from devices)
+function esc_(v) { const s = v === null || v === undefined ? '' : String(v); return /^[=+\-@]/.test(s) ? "'" + s : s; }
+function unesc_(s) { return /^'[=+\-@]/.test(s) ? s.slice(1) : s; }
+
+// What a device may receive of a record (owner / admin PIN hashes, bank details and face data stay with admin devices).
+function forDevice_(table, row, key, who) {
+  if (!row || who.forMain) return row;
+  const admin = !!who.admin;
+  if (table === 'users') {
+    const out = {}; Object.keys(row).forEach(function (k) { out[k] = row[k]; });
+    delete out.pin;
+    const top = BOSS_ROLES.indexOf(String(out.role || '')) >= 0;
+    // 1.0.0 build 1 (hardening, abuse C1): a non-admin device set to a shop only gets the PIN hashes of that shop's
+    // people (and people with no shop); a device with no shop yet gets the staff hashes so they can log in offline.
+    const devShop = admin ? '' : String((ctlAll_()[who.deviceId] || {}).shop || '');
+    const otherShop = !!devShop && !!out.shop_code && String(out.shop_code) !== devShop;
+    out.pin_hash = (admin || (!top && !otherShop)) && out.pin_hash ? unlockHash_(key, out.pin_hash) : null;
+    if (!admin) { if (!devShop || String(out.shop_code || '') !== devShop) { out.face = null; } }
+    return out;
+  }
+  if (!admin && (table === 'pay_profiles' || table === 'ap_suppliers' || table === 'staff_details')) {
+    const out = {}; Object.keys(row).forEach(function (k) { out[k] = /bank|account_no|tin$/.test(k) && k !== 'on_account' ? null : row[k]; });
+    return out;
+  }
+  return row;
+}
+
+// ---------------------------------------------------------------- per-till keys for the Aronium Link (C3)
+// The owner makes one key per till PC (Admin › Aronium link): EBL1.<till>.<secret>. It may only send that till's
+// aronium_feed records and run that till's link check – nothing else, nothing to read.
+function linkKeys_() { try { return JSON.parse(props_().getProperty('LINK_KEYS') || '{}'); } catch (e) { return {}; } }
+function linkKeyCreate_(body, who) {
+  const src = String(body.source || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 20);
+  if (!/^S\d+-T\d+$/.test(src)) return { ok: false, error: 'Which till? (e.g. S1-T1)' };
+  const key = 'EBL1.' + src + '.' + sha_(Utilities.getUuid() + Utilities.getUuid()).slice(0, 48);
+  const all = linkKeys_();
+  Object.keys(all).forEach(function (h) { if (all[h].source === src) delete all[h]; }); // a new key replaces the old one
+  all[sha_(key)] = { source: src, at: now_(), by: who.user ? who.user.name : who.deviceId };
+  props_().setProperty('LINK_KEYS', JSON.stringify(all));
+  log_('Link keys', [src, 'new key', who.deviceId]);
+  return { ok: true, key: key, source: src };
+}
+function linkApi_(body) {
+  // the Link sends { kind, source, till_key, records } (stream D); linkKey is the same key under its first name
+  const k = linkKeys_()[sha_(String(body.till_key || body.linkKey || ''))];
+  if (!k || (body.source && String(body.source) !== k.source)) { secEvent_('link_key', { device: 'till PC ' + String(body.source || '?'), what: 'A till PC request with a wrong or old key' }); return { ok: false, error: 'Not allowed' }; }
+  if (body.kind === 'link_check') return linkCheck_({ source: k.source });
+  const own = function (r) {
+    if (!r || r.t !== 'aronium_feed' || String(r.k).indexOf(k.source + '|') !== 0 || !r.row) return false;
+    if (r.row.source !== undefined && String(r.row.source) !== k.source) return false;
+    if (r.row.uid !== undefined && String(r.row.uid).indexOf(k.source + '|') !== 0) return false;
+    return JSON.stringify(r.row).length < 60000; // a receipts part is up to ~36 KB
+  };
+  const recs = (body.records || []).filter(own);
+  if (recs.length !== (body.records || []).length) { secEvent_('link_key', { device: 'till PC ' + k.source, what: 'The till PC key tried to send records that are not its own Aronium figures' }); return { ok: false, error: 'This till may only send its own Aronium records.' }; }
+  return push_(recs, 'link-' + k.source, { deviceId: 'link-' + k.source, link: true });
+}
+// Run from the editor after every till PC has its own key: a new main-software key (the old one stops working).
+function rotateMainKey() { props_().setProperty('MAIN_KEY', Utilities.getUuid() + Utilities.getUuid()); Logger.log('New main-software key (keep private): ' + props_().getProperty('MAIN_KEY')); }
+
+// ---------------------------------------------------------------- Changes sheet: compact (keep the newest entry per record)
+// Run from the editor or a monthly trigger. Pull positions are change numbers (seq), so devices carry on where they were.
+function compactChanges() {
+  return withLock_(function () {
+    const sh = sheet_('Changes', CHANGES_HEADER);
+    const last = sh.getLastRow();
+    if (last < 3) return 0;
+    const rows = sh.getRange(2, 1, last - 1, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
+    const newest = {};
+    rows.forEach(function (r, i) { newest[r[1] + '|' + r[2]] = i; });
+    const keep = rows.filter(function (r, i) { return newest[r[1] + '|' + r[2]] === i; });
+    sh.getRange(2, 1, rows.length, CHANGES_HEADER.length).clearContent();
+    if (keep.length) sh.getRange(2, 1, keep.length, CHANGES_HEADER.length).setValues(keep);
+    log_('Changes compacted', [rows.length, keep.length]);
+    return rows.length - keep.length;
+  });
+}
+
+// The supplier set-up pack (an Excel file the owner keeps in Drive – never in the app's code): the file whose id is in
+// Script properties › SETUP_PACK_FILE_ID, or else the file with this name. → { ok, name, mime, size, b64 }
+const SETUP_PACK_NAME = 'Easy Buys set-up pack – suppliers from invoices.xlsx';
+function setupPack_() {
+  const props = PropertiesService.getScriptProperties();
+  let file = null;
+  const id = props.getProperty('SETUP_PACK_FILE_ID');
+  if (id) { try { file = DriveApp.getFileById(id); if (!file || !file.getName || (file.isTrashed && file.isTrashed())) file = null; } catch (e) { file = null; } }
+  if (!file) {
+    const it = DriveApp.getFilesByName(SETUP_PACK_NAME);
+    while (it.hasNext()) { const f = it.next(); if (!(f.isTrashed && f.isTrashed())) { file = f; break; } }
+  }
+  if (!file) return { ok: false, code: 'NO_PACK', error: 'The supplier set-up pack is not in Google Drive. Upload "' + SETUP_PACK_NAME + '" to the Easy Buys Google Drive (or set SETUP_PACK_FILE_ID in Script properties).' };
+  const mime = String(file.getMimeType ? file.getMimeType() || '' : '');
+  if (mime === 'application/vnd.google-apps.spreadsheet') return { ok: false, code: 'NOT_XLSX', error: 'The set-up pack was turned into a Google Sheet. Upload it again as the .xlsx file (Drive › Settings › untick "Convert uploads").' };
+  const bytes = file.getBlob().getBytes();
+  if (!bytes || bytes.length < 100) return { ok: false, code: 'EMPTY', error: 'The set-up pack in Drive is empty.' };
+  return { ok: true, name: file.getName(), mime: mime || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: bytes.length, b64: Utilities.base64Encode(bytes) };
+}
+
+// Start clean (owner): the owner's PIN is checked HERE against the cloud copy (pinHash = p1:… of the PIN typed), a copy of
+// the whole data spreadsheet is kept in Drive › Backups › Clean start, then every table is cleared (the owner logins stay
+// so the owner can still sign in) and every device clears itself on its next sync (the fresh start marker).
+function cleanStart_(body, who) {
+  // The owner, logged in (session), types the PIN again: the proof of that PIN is checked here (it is kept on no device).
+  const uid = String(body.ownerUid || '');
+  if (!uid || !/^[0-9a-f]{64}$/.test(String(body.proof || ''))) return { ok: false, error: 'The owner\'s PIN is needed again.' };
+  const owner = cloudUser_(uid);
+  if (!owner || owner.role !== 'owner' || String(owner.active) === '0' || (who.user && who.user.uid !== uid)) return { ok: false, error: 'Only the owner can start clean.' };
+  if (!props_().getProperty('PV_' + uid)) return { ok: false, error: 'The owner\'s PIN has not reached the cloud yet. Sync first, then try again.' };
+  if (!proofOk_(uid, body.proof)) { log_('Refused', [who.deviceId, 'clean start', 'wrong owner PIN']); return { ok: false, error: 'Wrong PIN – nothing was cleared.' }; }
+  const at = String(body.at || now_());
+  const id = String(body.id || ('CLEAN-' + Utilities.getUuid()));
+  const ss = data_();
+  let copyId = null;
+  try {
+    const folder = folder_(path_(['Backups']), 'Clean start');
+    copyId = DriveApp.getFileById(ss.getId()).makeCopy('Easy Buys data before Start clean ' + at.slice(0, 19).replace(/[: ]/g, '-'), folder).getId();
+  } catch (e) { return { ok: false, error: 'The cloud copy could not be made – nothing was cleared. ' + String(e && e.message || e) }; }
+  // every table except the change history (it only ever grows; the copy above holds it too)
+  const tables = ss.getSheets().map(function (s) { return s.getName(); }).filter(function (n) { return /^T_[a-z_0-9]+$/.test(n) && n !== 'T_audit_log'; }).map(function (n) { return n.slice(2); });
+  const r = freshStart_({ key: apiKey_(), id: id, at: at, tables: tables, moveFiles: false });
+  if (!r.ok) return r;
+  const old = oldFilesAway_(at);
+  PropertiesService.getScriptProperties().setProperty('CLEAN_START', JSON.stringify({ id: id, at: at, by: String(body.by || ''), device: who.deviceId, copyId: copyId, oldFolder: old.name }));
+  log_('Start clean', [id, at, who.deviceId, String(body.by || ''), copyId, r.cleared, old.moved]);
+  secEvent_('clean_start', { device: who.deviceId, person: who.user ? who.user.name : String(body.by || ''), what: 'Start clean: ' + r.cleared + ' records cleared, ' + old.moved + ' Drive folders moved to "' + old.name + '"', refused: false });
+  return { ok: true, id: id, at: at, cleared: r.cleared, copyId: copyId, tables: tables.length, foldersMoved: old.moved, oldFolder: old.name };
+}
+// Start clean never deletes a Drive file: every Easy Buys folder in the cloud folder (Photos, Documents, Shift reports,
+// Purchase orders, Viber posts…) except Backups moves into ONE folder "Before 1.0.0 – old and test data <date>". Nothing is
+// shared or unshared (the files stay private); the owner can open or delete them later. The app starts with new, empty
+// folders (they are made again when first needed).
+function oldFilesAway_(at) {
+  const root = root_();
+  const name = 'Before 1.0.0 – old and test data ' + String(at).slice(0, 10);
+  const keep = ['Backups', name];
+  const names = [];
+  const it0 = root.getFolders ? root.getFolders() : null;
+  if (it0) while (it0.hasNext()) { const f = it0.next(); if (keep.indexOf(f.getName()) < 0 && !/^Before 1\.0\.0 – old and test data /.test(f.getName())) names.push(f); }
+  if (!names.length) return { moved: 0, name: name };
+  const dest = folder_(root, name);
+  names.forEach(function (f) { f.moveTo(dest); });
+  return { moved: names.length, name: name };
 }

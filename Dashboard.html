@@ -95,13 +95,16 @@
 <main id="main" style="display:none"><div id="boardArea"></div><div id="legacy"><div id="liveArea"></div><div id="planArea"></div><div id="restArea"></div></div><div id="footArea"></div></main>
 <script>
 var PW = '';
-try { PW = localStorage.getItem('eb_pw') || ''; } catch (e) {}
-function esc(s){ return String(s===null||s===undefined?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+// 1.0.0 build 1: the password is kept only while the page is open (never saved in the browser).
+function esc(s){ return String(s===null||s===undefined?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+// ids used inside onclick="…" (from the app's data): letters, digits and - _ . : only.
+function sid(s){ return String(s===null||s===undefined?'':s).replace(/[^A-Za-z0-9_.:-]/g,''); }
+// HTML made by this page (never the app's data) for a table cell.
+function H(h){ return { html: h }; }
 function go(){ PW = document.getElementById('pw').value; load(true); }
 function load(fromLogin){
   google.script.run.withSuccessHandler(function(r){
     if(!r.ok){ document.getElementById('login').style.display='block'; document.getElementById('main').style.display='none'; if(fromLogin) document.getElementById('err').textContent=r.error||'Wrong password'; return; }
-    try { localStorage.setItem('eb_pw', PW); } catch (e) {}
     document.getElementById('login').style.display='none'; document.getElementById('main').style.display='block';
     render(r);
   }).withFailureHandler(function(e){ document.getElementById('live').innerHTML = '<span class="dot" style="background:#B42318"></span>Connection problem – retrying'; }).getDashboard(PW);
@@ -129,17 +132,17 @@ function render(r){
   else { h += '<div class="batches">'; s.activeBatches.forEach(function(b){
     h += '<div class="batch'+(b.overdueMin>0?' over':'')+'"><b style="font-size:16px">'+esc(b.product)+'</b> <span class="muted">'+esc(b.code)+'</span><br>'
       + '<span class="tag" style="background:#2F5FC4">'+esc(b.step)+'</span> since '+esc(b.stepSince)+' ('+hm(b.inStepMin)+')<br>'
-      + 'Next: <b>'+esc(b.next)+'</b> at '+esc(b.nextDue) + (b.overdueMin>0?' <b style="color:#B42318">'+b.overdueMin+' min overdue</b>':'')
-      + '<br><span class="muted">'+esc(b.baker)+' · '+b.flourKg+' kg flour · expect '+b.expected+(b.cut!==null&&b.cut!==undefined?' · cut '+b.cut:'')+'</span></div>'; });
+      + 'Next: <b>'+esc(b.next)+'</b> at '+esc(b.nextDue) + (b.overdueMin>0?' <b style="color:#B42318">'+esc(b.overdueMin)+' min overdue</b>':'')
+      + '<br><span class="muted">'+esc(b.baker)+' · '+esc(b.flourKg)+' kg flour · expect '+esc(b.expected)+(b.cut!==null&&b.cut!==undefined?' · cut '+esc(b.cut):'')+'</span></div>'; });
     h += '</div>'; }
   h += '</div>';
-  h += '<div class="two"><div class="card"><h2>Who is on shift</h2>' + table(['Name','Signed on','Signed off','Hours'], s.workers.map(function(w){ return [w.name, w.signedOn, w.signedOff||'<span class="tag" style="background:#157F3B">ON SHIFT</span>', hm(w.minutes)]; }), true) + '</div>';
+  h += '<div class="two"><div class="card"><h2>Who is on shift</h2>' + table(['Name','Signed on','Signed off','Hours'], s.workers.map(function(w){ return [w.name, w.signedOn, w.signedOff||H('<span class="tag" style="background:#157F3B">ON SHIFT</span>'), hm(w.minutes)]; }), true) + '</div>';
   h += '<div class="card"><h2>Today by product</h2>' + table(['Product','Batches','Good','Expected','Yield'], t.byProduct.map(function(p){ return [p.product, p.batches, p.good, p.expected, p.yieldPct===null?'—':p.yieldPct+'%']; })) + '</div></div>';
   h += '<div class="card"><h2>Open alerts</h2>' + table(['Time','Alert','Details'], s.alerts.map(function(a){ return [a.date.slice(5)+' '+a.time, a.type, a.message]; })) + '</div>';
-  h += '<div class="two"><div class="card"><h2>Stock levels</h2>' + table(['Item','In stock','Minimum',''], s.stock.map(function(m){ return [m.name, m.stock+' '+m.unit, m.min||'—', m.low?'<span class="tag" style="background:#B42318">LOW</span>':'']; }), true) + '</div>';
+  h += '<div class="two"><div class="card"><h2>Stock levels</h2>' + table(['Item','In stock','Minimum',''], s.stock.map(function(m){ return [m.name, m.stock+' '+m.unit, m.min||'—', m.low?H('<span class="tag" style="background:#B42318">LOW</span>'):'']; }), true) + '</div>';
   h += '<div class="card"><h2>Purchase orders</h2>' + table(['PO','Supplier','Date','Status'], s.purchaseOrders.map(function(p){ return [p.no, p.supplier, p.date, p.status]; })) + '</div></div>';
   h += '<div class="two"><div class="card"><h2>Recent shifts</h2>' + table(['Date','Shift','Status','Batches'], s.recentShifts.map(function(x){ return [x.date, x.name+' ('+x.code+')', x.status, x.batches]; })) + '</div>';
-  h += '<div class="card"><h2>Reports &amp; purchase orders (Google Drive)</h2>' + table(['Type','File',''], (r.files||[]).map(function(f){ return [f.type, f.name, '<a href="'+f.url+'" target="_blank">Open</a>']; }), true) + '</div></div>';
+  h += '<div class="card"><h2>Reports &amp; purchase orders (Google Drive)</h2>' + table(['Type','File',''], (r.files||[]).map(function(f){ return [f.type, f.name, (/^https:\/\/(drive|docs)\.google\.com\//.test(String(f.url||''))?H('<a href="'+esc(f.url)+'" target="_blank" rel="noopener">Open</a>'):'')]; }), true) + '</div></div>';
   var foot = '<p class="muted" style="text-align:center;font-size:12px">'+esc(s.bakery)+' – '+esc(s.location)+' · app v'+esc(s.appVersion)+' · data from '+esc(s.generatedAt)+' · refreshes every 30 seconds</p>';
   document.getElementById('liveArea').innerHTML = top;
   document.getElementById('restArea').innerHTML = h;
@@ -177,11 +180,11 @@ function renderPlan(r){
   var made = {}; (s.planToday||[]).forEach(function(x){ made[x.id]=x; });
   var name = ''; try { name = localStorage.getItem('eb_name') || ''; } catch(e) {}
   var h = '<div class="card" id="planCard"><h2>📋 Production plan – change it from here</h2>';
-  h += '<div class="chips">' + dates.map(function(d){ return '<button class="chip'+(d===PLAN.date?' on':'')+'" onclick="pickDay(\''+d+'\')">'+esc(dayLabel(d, s.today.date))+'</button>'; }).join('') + '</div>';
+  h += '<div class="chips">' + dates.map(function(d){ return '<button class="chip'+(d===PLAN.date?' on':'')+'" onclick="pickDay(\''+sid(d)+'\')">'+esc(dayLabel(d, s.today.date))+'</button>'; }).join('') + '</div>';
   h += '<div class="scroll"><table><tr><th>Product</th><th>Planned</th>'+(isToday?'<th>Made so far</th>':'')+'</tr>';
   s.products.forEach(function(p){
     var m = made[p.id];
-    h += '<tr><td><b>'+esc(p.name)+'</b></td><td><input class="qty" type="number" min="0" step="1" inputmode="numeric" id="plan-'+p.id+'" value="'+esc(PLAN.values[p.id])+'" oninput="planInput('+p.id+', this.value)"> <span class="muted">'+esc(p.unit)+'</span></td>'
+    h += '<tr><td><b>'+esc(p.name)+'</b></td><td><input class="qty" type="number" min="0" step="1" inputmode="numeric" id="plan-'+sid(p.id)+'" value="'+esc(PLAN.values[p.id])+'" oninput="planInput('+(Number(p.id)||0)+', this.value)"> <span class="muted">'+esc(p.unit)+'</span></td>'
       + (isToday ? '<td>'+(m ? esc(m.good)+(m.inProgress?' <span class="muted">(+'+esc(m.inProgress)+' in oven)</span>':'') : '0')+'</td>' : '') + '</tr>';
   });
   h += '</table></div>';
@@ -231,7 +234,7 @@ function savePlan(){
 function kpi(l,v,c){ return '<div class="kpi"><div class="l">'+esc(l)+'</div><div class="v" style="color:'+(c||'#2B1A1C')+'">'+esc(v)+'</div></div>'; }
 function table(head, rows, raw){
   if(!rows.length) return '<div class="muted">None</div>';
-  return '<div class="scroll"><table><tr>'+head.map(function(x){return '<th>'+esc(x)+'</th>';}).join('')+'</tr>'+rows.map(function(r){ return '<tr>'+r.map(function(c){ return '<td>'+(raw && typeof c==='string' && c.indexOf('<')===0 ? c : esc(c))+'</td>'; }).join('')+'</tr>'; }).join('')+'</table></div>';
+  return '<div class="scroll"><table><tr>'+head.map(function(x){return '<th>'+esc(x)+'</th>';}).join('')+'</tr>'+rows.map(function(r){ return '<tr>'+r.map(function(c){ return '<td>'+(c && typeof c==='object' && typeof c.html==='string' ? c.html : esc(c))+'</td>'; }).join('')+'</tr>'; }).join('')+'</table></div>';
 }
 
 // ------------------------------------------------ the business dashboard (v3.9.4): sections sent by the app
@@ -251,7 +254,7 @@ function renderBoard(r){
   tabs.style.display='flex';
   tabs.innerHTML = b.sections.map(function(x){
     var badge = x.badge ? '<span class="badge" style="background:'+(x.badge.tone==='danger'?'var(--bad)':'var(--warn)')+'">'+esc(x.badge.text)+'</span>' : '';
-    return '<button class="tab'+(x.id===TAB?' on':'')+'" onclick="pickTab(\''+x.id+'\')">'+esc(x.icon||'')+' '+esc(x.title)+badge+'</button>'; }).join('');
+    return '<button class="tab'+(x.id===TAB?' on':'')+'" onclick="pickTab(\''+sid(x.id)+'\')">'+esc(x.icon||'')+' '+esc(x.title)+badge+'</button>'; }).join('');
   var sec = b.sections.filter(function(x){ return x.id===TAB; })[0];
   if(sec.legacy){ area.innerHTML=''; legacy.style.display='block'; return; }
   legacy.style.display='none';
@@ -266,14 +269,14 @@ function block(key, bl){
   if(bl.type==='tiles'){
     var g = '<div class="grid" style="margin-top:'+(bl.title?'4':'14')+'px">'+bl.items.map(function(t){
       var d = (t.delta===null||t.delta===undefined) ? '' : '<span class="delta '+(t.delta>=0?'up':'down')+'">'+(t.delta>=0?'▲ ':'▼ ')+Math.abs(t.delta)+'%</span>'+(t.sub?' · ':'');
-      return '<div class="kpi'+(t.tone?' t-'+t.tone:'')+'"><div class="l">'+esc(t.label)+'</div><div class="v'+(t.tone?' tone-'+t.tone:'')+'">'+esc(tval(t.value, t.money))+'</div>'+(d||t.sub?'<div class="s">'+d+esc(t.sub||'')+'</div>':'')+spark(t.spark)+'</div>'; }).join('')+'</div>';
+      return '<div class="kpi'+(t.tone?' t-'+sid(t.tone):'')+'"><div class="l">'+esc(t.label)+'</div><div class="v'+(t.tone?' tone-'+sid(t.tone):'')+'">'+esc(tval(t.value, t.money))+'</div>'+(d||t.sub?'<div class="s">'+d+esc(t.sub||'')+'</div>':'')+spark(t.spark)+'</div>'; }).join('')+'</div>';
     return bl.title ? '<div class="card strip"><h2>'+esc(bl.title)+'</h2>'+g+'</div>' : g;
   }
   if(bl.type==='note') return '<div class="note t-'+esc(bl.tone||'info')+'">'+esc(bl.text)+'</div>';
   if(bl.type==='list'){
     var h = '<div class="card"><h2>'+esc(bl.title||'')+'</h2>';
     if(!bl.items.length) return h+'<div class="muted">'+esc(bl.empty||'Nothing here.')+'</div></div>';
-    h += bl.items.map(function(x){ return '<div class="li'+(x.tone?' t-'+x.tone:'')+'"><div class="main"><div class="t">'+(x.tag?'<span class="tag" style="background:var(--bad);margin-right:6px">'+esc(x.tag)+'</span>':'')+esc(x.text)+'</div>'+(x.sub?'<div class="sub">'+esc(x.sub)+'</div>':'')+'</div>'+(x.right!==null&&x.right!==undefined?'<div class="amt'+(x.tone?' tone-'+x.tone:'')+'">'+esc(tval(x.right, x.money))+'</div>':'')+'</div>'; }).join('');
+    h += bl.items.map(function(x){ return '<div class="li'+(x.tone?' t-'+sid(x.tone):'')+'"><div class="main"><div class="t">'+(x.tag?'<span class="tag" style="background:var(--bad);margin-right:6px">'+esc(x.tag)+'</span>':'')+esc(x.text)+'</div>'+(x.sub?'<div class="sub">'+esc(x.sub)+'</div>':'')+'</div>'+(x.right!==null&&x.right!==undefined?'<div class="amt'+(x.tone?' tone-'+sid(x.tone):'')+'">'+esc(tval(x.right, x.money))+'</div>':'')+'</div>'; }).join('');
     return h+'</div>';
   }
   if(bl.type==='table') return tableBlock(key, bl);
@@ -291,10 +294,10 @@ function tableBlock(key, bl){
   var h = '<div class="card"><h2>'+esc(bl.title||'')+' <span class="muted" style="font-size:13px;font-weight:400">('+shown.length+(shown.length!==rows.length?' of '+rows.length:'')+')</span></h2>';
   if(bl.search || fcols.length){
     h += '<div class="tools">';
-    if(bl.search) h += '<input placeholder="Search…" value="'+esc(st.q)+'" oninput="BSTATE[\''+key+'\'].q=this.value;BSTATE[\''+key+'\'].n=100;redrawSoon()">';
+    if(bl.search) h += '<input placeholder="Search…" value="'+esc(st.q)+'" oninput="BSTATE[\''+sid(key)+'\'].q=this.value;BSTATE[\''+sid(key)+'\'].n=100;redrawSoon()">';
     fcols.forEach(function(c){
       var vals = []; rows.forEach(function(r){ var v = String(r[c.key]===undefined?'':r[c.key]); if(v && vals.indexOf(v)<0) vals.push(v); }); vals.sort();
-      h += '<select onchange="BSTATE[\''+key+'\'].f[\''+c.key+'\']=this.value;redrawNow()"><option value="">All – '+esc(c.label)+'</option>'+vals.map(function(v){ return '<option'+(st.f[c.key]===v?' selected':'')+'>'+esc(v)+'</option>'; }).join('')+'</select>';
+      h += '<select onchange="BSTATE[\''+sid(key)+'\'].f[\''+sid(c.key)+'\']=this.value;redrawNow()"><option value="">All – '+esc(c.label)+'</option>'+vals.map(function(v){ return '<option'+(st.f[c.key]===v?' selected':'')+'>'+esc(v)+'</option>'; }).join('')+'</select>';
     });
     h += '</div>';
   }
@@ -302,11 +305,11 @@ function tableBlock(key, bl){
   var link = rows.some(function(r){ return r._link; });
   h += '<div class="scroll"><table><tr>'+bl.cols.map(function(c){ return '<th'+(c.align==='right'?' class="r"':'')+'>'+esc(c.label)+'</th>'; }).join('')+(link?'<th></th>':'')+'</tr>';
   shown.slice(0, st.n).forEach(function(r){
-    h += '<tr class="'+(r._tone?'t-'+r._tone:'')+'">'+bl.cols.map(function(c){ return '<td'+(c.align==='right'?' class="r"':'')+'>'+esc(tval(r[c.key], c.money))+'</td>'; }).join('')
+    h += '<tr class="'+(r._tone?'t-'+sid(r._tone):'')+'">'+bl.cols.map(function(c){ return '<td'+(c.align==='right'?' class="r"':'')+'>'+esc(tval(r[c.key], c.money))+'</td>'; }).join('')
       + (link?'<td>'+(r._link?'<a href="'+esc(r._link)+'" target="_blank" rel="noopener">'+esc(bl.linkLabel||'Open')+'</a>':'')+'</td>':'')+'</tr>';
   });
   h += '</table></div>';
-  if(shown.length>st.n) h += '<button class="more" onclick="BSTATE[\''+key+'\'].n+=200;redrawNow()">Show more ('+(shown.length-st.n)+' left)</button>';
+  if(shown.length>st.n) h += '<button class="more" onclick="BSTATE[\''+sid(key)+'\'].n+=200;redrawNow()">Show more ('+(shown.length-st.n)+' left)</button>';
   return h+'</div>';
 }
 var RT = null;
