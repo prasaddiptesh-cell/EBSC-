@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 13;                // 1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 14;                // 1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -108,6 +108,7 @@ function doPost(e) {
     try { migratePins_(); } catch (x) { /* tried again on the next request */ }
     who.user = sessionUser_(body, who);
     if (body.kind === 'user_login') return json_(userLogin_(body, who));
+    if (body.kind === 'link_pull_request') return json_(linkPullRequest_(body, who));
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
     if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who); devicePulled_(who.deviceId, body, out); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.user = who.user ? who.user.role : null; return json_(out); }
     if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
@@ -2424,7 +2425,15 @@ function linkApi_(body) {
   // the Link sends { kind, source, till_key, records } (stream D); linkKey is the same key under its first name
   const k = linkKeys_()[sha_(String(body.till_key || body.linkKey || ''))];
   if (!k || (body.source && String(body.source) !== k.source)) { secEvent_('link_key', { device: 'till PC ' + String(body.source || '?'), what: 'A till PC request with a wrong or old key' }); return { ok: false, error: 'Not allowed' }; }
-  if (body.kind === 'link_check') return linkCheck_({ source: k.source });
+  if (body.kind === 'link_check') {
+    // 1.0.0 build 5: the Link asks every ~30 s (pull_only: the cheap answer) and says when it has answered a pull
+    if (body.pulled) pullDone_(k.source);
+    const pull = pullOpen_(k.source);
+    if (body.pull_only) return { ok: true, version: SCRIPT_VERSION, pull: pull };
+    const chk = linkCheck_({ source: k.source });
+    chk.pull = pull;
+    return chk;
+  }
   const own = function (r) {
     if (!r || r.t !== 'aronium_feed' || String(r.k).indexOf(k.source + '|') !== 0 || !r.row) return false;
     if (r.row.source !== undefined && String(r.row.source) !== k.source) return false;
@@ -2433,7 +2442,85 @@ function linkApi_(body) {
   };
   const recs = (body.records || []).filter(own);
   if (recs.length !== (body.records || []).length) { secEvent_('link_key', { device: 'till PC ' + k.source, what: 'The till PC key tried to send records that are not its own Aronium figures' }); return { ok: false, error: 'This till may only send its own Aronium records.' }; }
-  return push_(recs, 'link-' + k.source, { deviceId: 'link-' + k.source, link: true });
+  const res = push_(recs, 'link-' + k.source, { deviceId: 'link-' + k.source, link: true });
+  if (res && res.ok) { if (body.full) pullDone_(k.source); res.pull = pullOpen_(k.source); }
+  return res;
+}
+
+// ---------------------------------------------------------------- 1.0.0 build 5: "Get the End of day now" (owner, 2 Nov)
+// The owner / admin (any shop) or a manager / supervisor (own shop) asks that shop's till PCs to send now instead of
+// waiting for their next round. The request is kept in Script properties (and the script cache, so the till PCs' checks
+// every 30 s cost almost nothing): { S1: { ms, at, by, device, done: { 'S1-T1': time } } }. Each till PC is told pull: true
+// until it has sent after the request (a full send, or its "pulled" answer). One request per shop every 30 s; a request
+// is forgotten after 10 minutes. Nothing from the request goes into a cell.
+const PULL_ROLES = ['owner', 'admin', 'manager', 'supervisor'];
+const PULL_GAP_MS = 30000;
+const PULL_OPEN_MS = 10 * 60000;
+function pullCache_() { try { return typeof CacheService !== 'undefined' ? CacheService.getScriptCache() : null; } catch (e) { return null; } }
+function pullAll_() {
+  const c = pullCache_();
+  let txt = null;
+  try { txt = c ? c.get('LINK_PULLS') : null; } catch (e) { txt = null; }
+  if (txt === null || txt === undefined) txt = props_().getProperty('LINK_PULLS') || '{}';
+  try { const o = JSON.parse(txt); return o && typeof o === 'object' ? o : {}; } catch (e) { return {}; }
+}
+function pullSave_(all) {
+  const txt = JSON.stringify(all);
+  props_().setProperty('LINK_PULLS', txt);
+  const c = pullCache_();
+  try { if (c) c.put('LINK_PULLS', txt, 600); } catch (e) { /* the properties copy is read instead */ }
+}
+function pullTills_(shop) {
+  const ks = linkKeys_();
+  const out = [];
+  Object.keys(ks).forEach(function (h) { const s = String(ks[h].source || ''); if (s.indexOf(shop + '-') === 0 && out.indexOf(s) < 0) out.push(s); });
+  return out.sort();
+}
+function pullView_(shop, p) {
+  return { ok: true, shopCode: shop, at: p ? p.at : null, by: p ? p.by : '', tills: pullTills_(shop), answered: p ? Object.keys(p.done || {}).sort() : [] };
+}
+function linkPullRequest_(body, who) {
+  const shop = String(body.shopCode || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  if (!/^S\d+$/.test(shop)) return { ok: false, error: 'Which shop?' };
+  const role = who && who.user ? who.user.role : '';
+  const u = role ? cloudUser_(who.user.uid) : null;
+  if (!u || PULL_ROLES.indexOf(role) < 0) {
+    log_('Refused', [who ? who.deviceId : '', 'link pull ' + shop, role || 'no login']);
+    return { ok: false, needLogin: !role, error: 'Only the owner, an admin, a manager or a supervisor can ask the till PCs (logged in, with the internet on).' };
+  }
+  if (BOSS_ROLES.indexOf(role) < 0 && String(u.shop_code || '') !== shop) return { ok: false, error: 'You can only ask your own shop\'s till PCs.' };
+  return withLock_(function () {
+    const all = pullAll_();
+    const t = Date.now();
+    Object.keys(all).forEach(function (s) { if (!(t - Number(all[s] && all[s].ms) < PULL_OPEN_MS)) delete all[s]; });
+    const p = all[shop];
+    if (body.check) return pullView_(shop, p);
+    if (p && t - Number(p.ms) < PULL_GAP_MS) {
+      const v = pullView_(shop, p);
+      v.already = true; v.wait = Math.ceil((PULL_GAP_MS - (t - Number(p.ms))) / 1000);
+      return v;
+    }
+    all[shop] = { ms: t, at: now_(), by: esc_(String(u.name || who.user.name || '').slice(0, 60)), device: esc_(String(who.deviceId || '').slice(0, 60)), done: {} };
+    pullSave_(all);
+    log_('Link pull', [shop, all[shop].by, all[shop].device]);
+    return pullView_(shop, all[shop]);
+  });
+}
+// A till PC: is there a request for its shop it has not answered yet?
+function pullOpen_(source) {
+  const p = pullAll_()[String(source).split('-')[0]];
+  return !!p && Date.now() - Number(p.ms) < PULL_OPEN_MS && !(p.done || {})[source];
+}
+function pullDone_(source) {
+  if (!pullOpen_(source)) return;
+  withLock_(function () {
+    const all = pullAll_();
+    const p = all[String(source).split('-')[0]];
+    if (!p) return;
+    p.done = p.done || {};
+    p.done[source] = now_();
+    pullSave_(all);
+  });
 }
 // Run from the editor after every till PC has its own key: a new main-software key (the old one stops working).
 function rotateMainKey() { props_().setProperty('MAIN_KEY', Utilities.getUuid() + Utilities.getUuid()); Logger.log('New main-software key (keep private): ' + props_().getProperty('MAIN_KEY')); }
