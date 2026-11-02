@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 16;                // 1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 17;                // 1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -118,7 +118,7 @@ function doPost(e) {
     if (body.kind === 'problem_log') return json_(problemLogSave_(body, who));
     if (body.kind === 'problem_log_get') return json_(problemLogGet_(body.id));
     if (body.kind === 'cloud_settings') return json_((body.requireApproval === undefined && body.strictSign === undefined && body.linkCutover === undefined ? null : needOwner_(who, body, 'Changing the cloud settings')) || cloudSettings_(body));
-    if (body.kind === 'fresh_start') return json_(freshStart_(body));
+    if (body.kind === 'fresh_start') return json_(needOwner_(who, body, 'Start fresh') || freshStart_(body)); // 1.0.0 build 9: the owner only (any device the owner is logged in on)
     if (body.kind === 'clean_start') return json_(needOwner_(who, body, 'Start clean') || cleanStart_(body, who));
     if (body.kind === 'tidy_records') return json_(needOwner_(who, body, 'Tidy Drive photos') || tidyRecords_(body.maxMs));
     if (body.kind === 'setup_pack') return json_(needOwner_(who, body, 'The supplier set-up pack') || setupPack_());
@@ -142,7 +142,9 @@ function doPost(e) {
 
       case 'snapshot': {
         // 1.0.0 build 1: the online dashboard's figures come only from the main tablet (the one holding the cloud key).
-        if (!who.viaKey) return json_({ ok: false, error: 'Only the main tablet sends the dashboard figures.' });
+        // 1.0.0 build 9 (owner, 2 Nov: "any device should be able to do it"): any linked device with the owner, an admin
+        // or a manager logged in sends the dashboard (their device has the whole picture); a staff-only phone does not
+        if (!who.viaKey && !isAdminDevice_(who.deviceId, false) && !(who.user && ['owner', 'admin', 'manager', 'supervisor'].indexOf(who.user.role) >= 0)) return json_({ ok: true, ignored: true, code: 'NOT_MAIN', note: 'Only the main tablet sends the dashboard figures.', version: SCRIPT_VERSION }); // 2 Nov: ignored, never an error – an error stopped older apps' whole sync
         const props = PropertiesService.getScriptProperties();
         const text = JSON.stringify(body.snapshot);
         // Script properties hold up to ~9 KB per value, so larger snapshots go to a Drive file.
@@ -1353,7 +1355,7 @@ function requireApprovalOff() { PropertiesService.getScriptProperties().setPrope
 // the change list keeps working (old entries just point at nothing), and records from before the fresh start that a
 // device still had waiting are refused when they arrive. Test photos and documents move to a "Test data" folder.
 function freshStart_(body) {
-  if (!body.key || body.key !== apiKey_()) return { ok: false, error: 'Start fresh only from the main tablet (the one holding the cloud key).' };
+  // 1.0.0 build 9: the owner's session is checked before this (needOwner_) – from any device; devices no longer hold the cloud key
   const tables = (body.tables || []).filter(function (t) { return /^[a-z_0-9]+$/.test(t); });
   const at = String(body.at || '');
   if (!tables.length || !at) return { ok: false, error: 'Nothing to clear.' };
