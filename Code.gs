@@ -25,12 +25,31 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 17;                // 1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 18;                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
 
 // ---------------------------------------------------------------- helpers
+// The log spreadsheet: found once (its id kept), not searched for in Drive on every log line.
+function logBook_() {
+  if (REQ_.log) return REQ_.log;
+  const p = PropertiesService.getScriptProperties();
+  const id = p.getProperty('LOG_ID');
+  let ss = null;
+  if (id && SpreadsheetApp.openById) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
+  if (!ss) {
+    const ssIt = root_().getFilesByName('Bakery Cloud Log');
+    ss = ssIt.hasNext() ? SpreadsheetApp.open(ssIt.next()) : (function () {
+      const created = SpreadsheetApp.create('Bakery Cloud Log');
+      DriveApp.getFileById(created.getId()).moveTo(root_());
+      return created;
+    })();
+    try { if (ss.getId) p.setProperty('LOG_ID', ss.getId()); } catch (e) { /* searched again next time */ }
+  }
+  REQ_.log = ss;
+  return ss;
+}
 function json_(obj) {
   // 1.0.0 build 1 (hardening): every reply carries the cloud's own clock (ms since 1970, UTC) so a device can tell when
   // its clock is wrong (the app refuses money work then – the time is always Fiji time).
@@ -69,12 +88,8 @@ function replaceFile_(folder, fileName, base64, mime) {
   return folder.createFile(Utilities.newBlob(Utilities.base64Decode(base64), mime, fileName));
 }
 function log_(sheetName, row) {
-  const ssIt = root_().getFilesByName('Bakery Cloud Log');
-  const ss = ssIt.hasNext() ? SpreadsheetApp.open(ssIt.next()) : (function () {
-    const created = SpreadsheetApp.create('Bakery Cloud Log');
-    DriveApp.getFileById(created.getId()).moveTo(root_());
-    return created;
-  })();
+  if (REQ_.locked) { later_(function () { log_(sheetName, row); }); return; } // 1.0.0 build 10: never inside the lock
+  const ss = logBook_();
   const sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   sh.appendRow([new Date()].concat((row || []).map(function (v) { return typeof v === 'string' ? esc_(v) : v; })));
   // 1.0.0 build 1: every refusal is a security event for the owner (wrong PINs count up separately: failCount_).
@@ -86,6 +101,7 @@ function cleanEmails_(list) {
 
 // ---------------------------------------------------------------- tablet → cloud
 function doPost(e) {
+  REQ_ = {}; // what this request has read already (a request never reads the same sheet twice)
   try {
     const body = JSON.parse(e.postData.contents);
     // Viber calls this address (the channel's webhook) to check it is alive, and with channel events: just say OK.
@@ -110,8 +126,11 @@ function doPost(e) {
     if (body.kind === 'user_login') return json_(userLogin_(body, who));
     if (body.kind === 'link_pull_request') return json_(linkPullRequest_(body, who));
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
-    if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who); devicePulled_(who.deviceId, body, out); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.user = who.user ? who.user.role : null; return json_(out); }
+    if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who, Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
+      // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
+      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.user = who.user ? who.user.role : null; return json_(out); }
     if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
+    if (body.kind === 'invite_cancel') return json_(needOwner_(who, body, 'Cancelling an invite') || inviteCancel_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
     if (body.kind === 'device_status') return json_(needOwner_(who, body, 'Blocking or allowing a device') || deviceStatus_(body.id, body.status, who));
     if (body.kind === 'device_control') return json_(needOwner_(who, body, 'Changing a device') || deviceControl_(body, who));
@@ -397,17 +416,39 @@ function doPost(e) {
         // 1.0.0 build 1: owner: true = a business-wide money alert – it goes ONLY to the owner / admin channel when there is
         // one (never to a shop's channel, where the staff are); without an owner channel, to the main channel as before.
         const ch = body.owner ? (viberKey_('OWNER') ? 'OWNER' : '') : body.shopCode;
-        if (Array.isArray(body.files) && body.files.length) return json_(viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4), ch));
-        return json_(viber_(String(body.text || '').slice(0, 7000), ch));
+        // 1.0.0 build 10: the automatic posts carry a "once" key – whichever device makes them, each goes once.
+        // review: the check and the claim are one step inside the write lock (two devices asking at the same moment used
+        // to both see "not posted yet"); the post itself goes outside the lock; a failed post lets the key go again.
+        // forget: the key of an alert that is sorted now (so it is posted again if it comes back).
+        const once = body.once ? String(body.once).slice(0, 200) : '';
+        const forget = body.forget ? String(body.forget).slice(0, 200) : '';
+        if (once) {
+          const mine = withLock_(function () { if (viberOnceSeen_(once) || viberOnceClaimed_(once)) return false; viberOnceClaim_(once, true); return true; }, 5000);
+          if (!mine) return json_({ ok: true, skipped: true, note: 'Already posted (from another device).' });
+        }
+        let vr;
+        try { vr = Array.isArray(body.files) && body.files.length ? viberFiles_(String(body.text || '').slice(0, 7000), body.files.slice(0, 4), ch) : viber_(String(body.text || '').slice(0, 7000), ch); }
+        finally {
+          if (once) { if (vr && vr.ok) viberOnceKeep_(once); viberOnceClaim_(once, false); }
+        }
+        if (forget && vr && vr.ok) { try { withLock_(function () { viberOnceForget_(forget); }, 5000); } catch (e) { /* kept 15 days at most */ } }
+        return json_(vr);
       }
+
+      case 'job_lease':
+        return json_(jobLease_(body, who));
 
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
     }
   } catch (err) {
+    // 1.0.0 build 10: the write lock was not free within a few seconds – answer at once (the app tries again in a moment)
+    // instead of hanging until the app gives up ("Aborted").
+    if (err && err.busy) return json_(busyReply_());
     return json_({ ok: false, error: String(err && err.message ? err.message : err) });
-  }
+  } finally { flushLater_(); }
 }
+function busyReply_() { return { ok: false, busy: true, retryMs: 1500 + Math.floor(Math.random() * 2500), error: 'The cloud is busy – trying again.' }; }
 
 // v3.5: payslip addresses are the ones saved in Payroll › Pay details (synced pay_profiles).
 function payEmail_(addr) {
@@ -604,7 +645,7 @@ function ocr_(blob) {
 }
 
 // ---------------------------------------------------------------- online dashboard
-function doGet(e) {
+function doGetRun_(e) {
   if (e && e.parameter && e.parameter.link) return linkPage_(String(e.parameter.link));
   return HtmlService.createTemplateFromFile('Dashboard').evaluate()
     .setTitle('Easy Buys Business Dashboard')
@@ -667,7 +708,7 @@ function dashCheck_(password) {
 }
 
 // Called by the dashboard page every 30 seconds.
-function getDashboard(password) {
+function getDashboardRun_(password) {
   const bad = dashCheck_(password);
   if (bad) return bad;
   const props = PropertiesService.getScriptProperties();
@@ -689,7 +730,7 @@ function planEdits_() {
 
 // Called by the dashboard when "Save plan" is pressed.
 // items: { productId: quantity }  (0 or empty = not planned)
-function savePlanOnline(password, date, items, byName) {
+function savePlanOnlineRun_(password, date, items, byName) {
   const bad = dashCheck_(password);
   if (bad) return bad;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return { ok: false, error: 'Invalid date' };
@@ -748,10 +789,14 @@ function authorize() {
 
 
 // ================================================================ EASY BUYS v3: shared records
+// 1.0.0 build 10: per request memory (reset at the start of every request): the data spreadsheet is opened once, the
+// people and the shared settings are read once, and logs / security events wait until the write lock is let go.
+let REQ_ = {};
 function data_() {
   const props = PropertiesService.getScriptProperties();
   const id = props.getProperty('DATA_ID');
-  if (id) { try { return SpreadsheetApp.openById(id); } catch (e) { /* deleted: make a new one */ } }
+  if (id && REQ_.ss && REQ_.ssId === id) return REQ_.ss;
+  if (id) { try { const ss0 = SpreadsheetApp.openById(id); REQ_.ss = ss0; REQ_.ssId = id; return ss0; } catch (e) { /* deleted: make a new one */ } }
   const ss = SpreadsheetApp.create(DATA_NAME);
   try { DriveApp.getFileById(ss.getId()).moveTo(root_()); } catch (e) { /* stays in My Drive */ }
   props.setProperty('DATA_ID', ss.getId());
@@ -771,11 +816,19 @@ function sheet_(name, header) {
   }
   return sh;
 }
+// 1.0.0 build 10: the people and the shared settings are read once per request (every record of a push used to read
+// the whole people sheet again); forgetValues_ after writing them.
+const MEMO_SHEETS = { T_users: true, T_shared_settings: true };
 function values_(sh) {
+  const name = sh.getName ? String(sh.getName()) : '';
+  const memo = MEMO_SHEETS[name] === true;
+  if (memo && REQ_.vals && REQ_.vals[name]) return REQ_.vals[name];
   const last = sh.getLastRow();
-  if (last < 2) return [];
-  return sh.getRange(2, 1, last - 1, sh.getLastColumn()).getValues().map(function (r) { return r.map(text_); });
+  const out = last < 2 ? [] : sh.getRange(2, 1, last - 1, sh.getLastColumn()).getValues().map(function (r) { return r.map(text_); });
+  if (memo) (REQ_.vals = REQ_.vals || {})[name] = out;
+  return out;
 }
+function forgetValues_(name) { if (!REQ_.vals) return; if (name) delete REQ_.vals[name]; else REQ_.vals = {}; }
 // Safety net if a cell was ever typed or formatted by hand.
 function text_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
@@ -784,17 +837,43 @@ function text_(v) {
 const TABLE_HEADER = ['key', 'updated_at', 'device', 'seq', 'json'];
 const CHANGES_HEADER = ['seq', 'table', 'key', 'row', 'device', 'received_at'];
 const DEVICE_HEADER = ['id', 'name', 'kind', 'status', 'token_hash', 'first_seen', 'last_seen', 'app', 'invited_by', 'note'];
-const INVITE_HEADER = ['code', 'created_at', 'expires_at', 'created_by', 'email', 'used_at', 'used_by'];
+// 1.0.0 build 10: uses (how many devices may join with it, 1–5), used_n (how many have), cancelled (by the owner)
+const INVITE_HEADER = ['code', 'created_at', 'expires_at', 'created_by', 'email', 'used_at', 'used_by', 'uses', 'used_n', 'cancelled'];
 
 function sha_(s) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(s), Utilities.Charset.UTF_8)
     .map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
 }
 function now_() { return new Date().toISOString(); }
-function withLock_(fn) {
+// 1.0.0 build 10: the write lock is waited for a few seconds only (tryLock); if another request still holds it the
+// request is answered "busy" at once (see doPost) and the app tries again. Only writes take it: pulls, the devices list,
+// ping and the till PCs' quick checks never wait for it.
+const LOCK_WAIT_MS = 8000;
+function withLock_(fn, waitMs) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(25000);
-  try { return fn(); } finally { lock.releaseLock(); }
+  if (!lock.tryLock(waitMs || LOCK_WAIT_MS)) { const e = new Error('The cloud is busy – trying again.'); e.busy = true; throw e; }
+  REQ_.locked = (REQ_.locked || 0) + 1;
+  try { return fn(); } finally { lock.releaseLock(); REQ_.locked -= 1; }
+}
+// Work that does not need the lock (logs, security events): done when the lock is let go, or at the end of the request.
+function later_(fn) { if (REQ_.locked) (REQ_.later = REQ_.later || []).push(fn); else fn(); }
+// 1.0.0 build 10 (review): a run that is not a request (a trigger, or Run from the editor: compactChanges, the daily
+// security summary, tidyRecords …, and the dashboard page's calls) starts with fresh request memory and writes the logs
+// and security events it held back while it had the lock when it ends (they used to be lost).
+function entry_(fn) { REQ_ = {}; try { return fn(); } finally { flushLater_(); } }
+function doGet() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return doGetRun_.apply(null, a); }); }
+function getDashboard() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return getDashboardRun_.apply(null, a); }); }
+function savePlanOnline() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return savePlanOnlineRun_.apply(null, a); }); }
+function setup() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return setupRun_.apply(null, a); }); }
+function hashPins() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return hashPinsRun_.apply(null, a); }); }
+function securityDigest() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return securityDigestRun_.apply(null, a); }); }
+function checkHistory() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return checkHistoryRun_.apply(null, a); }); }
+function compactChanges() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return compactChangesRun_.apply(null, a); }); }
+function tidyRecords() { const a = Array.prototype.slice.call(arguments); return entry_(function () { return tidyRecordsRun_.apply(null, a); }); }
+function flushLater_() {
+  const list = REQ_.later || [];
+  REQ_.later = [];
+  list.forEach(function (fn) { try { fn(); } catch (e) { /* a log never stops a request */ } });
 }
 
 // Store records from a device (or the main software). The newest change wins.
@@ -837,18 +916,29 @@ function push_(records, deviceId, who) {
       const index = {};
       rows.forEach(function (row, i) { index[String(row[0])] = { i: i + 2, updated: String(row[1]) }; });
       const appends = [];
+      // 1.0.0 build 10: the rows already in the cloud that this push changes are read together (a few blocks), not one
+      // read per record; rows that sit next to each other are written together too.
+      const haveNos = [];
+      byTable[table].forEach(function (r) { const h = index[String(r.k)]; if (h) haveNos.push(h.i); });
+      const haveRows = rowsAt_(sh, haveNos);
+      const updates = {};
       byTable[table].forEach(function (r) {
         const key = String(r.k);
         const updated = String(r.u || (r.row && r.row.updated_at) || '');
         const have = index[key];
         if (updated.replace('T', ' ').slice(0, 19) > future) { rejected.push({ t: table, k: key, why: 'time in the future' }); log_('Refused', [deviceId, table + ' ' + key, 'time in the future ' + updated]); return; }
-        if (table === 'audit_log' && have) { rejected.push({ t: table, k: key, why: 'the change history cannot be changed' }); log_('Refused', [deviceId, 'audit_log ' + key, 'history change']); return; }
+        if (table === 'audit_log' && have) {
+          // 1.0.0 build 10 (review): a push sent again after our time limit ran out (by design) carries the same history
+          // lines: the very same line from the same device is taken quietly (nothing written, no security alert).
+          if (sameHistoryRow_(haveRows[have.i], r.row, updated, deviceId)) { accepted.push({ t: table, k: key, again: true }); return; }
+          rejected.push({ t: table, k: key, why: 'the change history cannot be changed' }); log_('Refused', [deviceId, 'audit_log ' + key, 'history change']); return;
+        }
         if (have && have.updated > updated) { rejected.push({ t: table, k: key, why: 'newer change already in the cloud' }); return; }
         if (fresh && fresh.tables.indexOf(table) >= 0 && updated && updated < fresh.at) { rejected.push({ t: table, k: key, why: 'from before the fresh start' }); return; }
         let row = {};
         Object.keys(r.row || {}).forEach(function (c) { row[c] = r.row[c]; });
         delete row._vby;
-        const haveRow = have ? (rowsAt_(sh, [have.i])[have.i] || null) : null;
+        const haveRow = have ? (haveRows[have.i] || null) : null;
         // Locked records and settings: an owner / admin session (the device gets the cloud's copy back to show what is in force).
         const why = bootstrap ? null : (lockedChange_(table, key, table === 'users' ? hashUserRow_(row, key, false) : row, haveRow, boss, oldAdmin)
           || periodChange_(table, row, haveRow, boss, lockDay) || shopChange_(table, row, haveRow, boss, who));
@@ -875,6 +965,15 @@ function push_(records, deviceId, who) {
           row = hashUserRow_(row, key, boss || bootstrap || oldAdmin || !have);
           if (!row.pin_hash && haveRow) { try { const cur = JSON.parse(haveRow[4] || '{}'); if (cur.pin_hash) row.pin_hash = cur.pin_hash; } catch (e) { /* none */ } }
         }
+        // 1.0.0 build 10: a device that is not an admin device never received the bank / account / TIN fields (forDevice_),
+        // so its copy has them empty: a change it sends (a supplier's phone number, or the Aronium supplier round on a
+        // phone holding the link job) keeps the cloud's values instead of wiping them.
+        if (haveRow && !who.admin && !who.forMain && !who.main && MASKED_TABLES.indexOf(table) >= 0) {
+          try {
+            const cur = JSON.parse(haveRow[4] || '{}') || {};
+            Object.keys(cur).forEach(function (c) { if (MASKED_FIELD.test(c) && c !== 'on_account' && (row[c] === null || row[c] === undefined || row[c] === '')) row[c] = cur[c]; });
+          } catch (e) { /* the row as sent */ }
+        }
         // Who the cloud vouches for: the person logged in (session); the first owner set up on the main tablet; an old app on
         // an admin device during the 7 days. Devices only apply locked records the cloud vouches for (services/locked.js).
         if (who.user) row._vby = { uid: who.user.uid, role: who.user.role };
@@ -886,7 +985,9 @@ function push_(records, deviceId, who) {
         let rowNo;
         if (have) {
           rowNo = have.i;
-          sh.getRange(rowNo, 1, 1, line.length).setValues([line]);
+          updates[rowNo] = line;
+          haveRows[rowNo] = line.map(String);
+          have.updated = updated;
         } else {
           rowNo = sh.getLastRow() + 1 + appends.length;
           appends.push(line);
@@ -896,7 +997,9 @@ function push_(records, deviceId, who) {
         newChanges.push([seq, table, esc_(key), rowNo, esc_(deviceId), now_()]);
         accepted.push({ t: table, k: key });
       });
+      writeRuns_(sh, updates);
       if (appends.length) sh.getRange(sh.getLastRow() + 1, 1, appends.length, TABLE_HEADER.length).setValues(appends);
+      if (MEMO_SHEETS['T_' + table]) forgetValues_('T_' + table);
     });
     if (newChanges.length) changes.getRange(changes.getLastRow() + 1, 1, newChanges.length, CHANGES_HEADER.length).setValues(newChanges);
     historyChain_(history);
@@ -905,13 +1008,29 @@ function push_(records, deviceId, who) {
   });
 }
 
+// The history line already in the cloud is the very same as the one sent (same time, same device, same content).
+function stableJson_(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(stableJson_).join(',') + ']';
+  return '{' + Object.keys(v).filter(function (k) { return k !== '_vby' && v[k] !== undefined; }).sort().map(function (k) { return JSON.stringify(k) + ':' + stableJson_(v[k]); }).join(',') + '}';
+}
+function sameHistoryRow_(haveRow, row, updated, deviceId) {
+  if (!haveRow) return false;
+  if (text_(haveRow[1]) !== String(updated) || text_(haveRow[2]) !== String(deviceId)) return false;
+  let cur = null;
+  try { cur = JSON.parse(String(haveRow[4] || 'null')); } catch (e) { return false; }
+  return !!cur && stableJson_(cur) === stableJson_(row || {});
+}
 // Key and time of every row (columns A–B only).
 function keysOf_(sh) {
   const last = sh.getLastRow();
   if (last < 2) return [];
   return sh.getRange(2, 1, last - 1, 2).getValues().map(function (r) { return r.map(text_); });
 }
-// Some rows of a table: the few asked for one by one, or the whole table when most of it is wanted.
+// Some rows of a table. 1.0.0 build 10: rows close to each other are read as one block (a gap of up to RUN_GAP rows is
+// read along), so 800 rows of a pull are a handful of reads instead of 800 (the first sync of a phone took 6 minutes);
+// the whole table in one read when most of it is wanted.
+const RUN_GAP = 20;
 function rowsAt_(sh, rowNos) {
   const out = {};
   const last = sh.getLastRow();
@@ -921,8 +1040,34 @@ function rowsAt_(sh, rowNos) {
     rowNos.forEach(function (n) { if (all[n - 2]) out[n] = all[n - 2]; });
     return out;
   }
-  rowNos.forEach(function (n) { if (n >= 2 && n <= last) out[n] = sh.getRange(n, 1, 1, TABLE_HEADER.length).getValues()[0].map(text_); });
+  runsOf_(rowNos.filter(function (n) { return n >= 2 && n <= last; }), RUN_GAP).forEach(function (run) {
+    const vals = sh.getRange(run[0], 1, run[1] - run[0] + 1, TABLE_HEADER.length).getValues();
+    for (let n = run[0]; n <= run[1]; n++) out[n] = vals[n - run[0]].map(text_);
+  });
+  // only the rows asked for
+  const want = {}; rowNos.forEach(function (n) { want[n] = true; });
+  Object.keys(out).forEach(function (n) { if (!want[n]) delete out[n]; });
   return out;
+}
+// [first, last] row runs of the sorted row numbers, joining rows at most `gap` apart.
+function runsOf_(rowNos, gap) {
+  const sorted = rowNos.slice().sort(function (a, b) { return a - b; });
+  const runs = [];
+  sorted.forEach(function (n) {
+    const cur = runs[runs.length - 1];
+    if (cur && n - cur[1] <= gap) cur[1] = Math.max(cur[1], n); else runs.push([n, n]);
+  });
+  return runs;
+}
+// Write changed rows: rows next to each other (no gap) in one write.
+function writeRuns_(sh, updates) {
+  const nos = Object.keys(updates).map(Number);
+  if (!nos.length) return;
+  runsOf_(nos, 1).forEach(function (run) {
+    const lines = [];
+    for (let n = run[0]; n <= run[1]; n++) lines.push(updates[n]);
+    sh.getRange(run[0], 1, lines.length, TABLE_HEADER.length).setValues(lines);
+  });
 }
 const PULL_MAX_CHARS = 3500000; // one answer stays small enough for a tablet on a slow connection
 
@@ -939,14 +1084,19 @@ function firstAfter_(sh, since, last) {
 }
 // Changes after `since`, made by other devices (the main software gets everything). who: the device asking – what it may
 // receive is trimmed by forDevice_; the change history only goes to admin devices.
-function pull_(since, deviceId, forMain, who) {
+// 1.0.0 build 10: nothing new (the device is at the newest change number) → answered without reading the sheets;
+// limit: a smaller page asked by the app after a page took too long; left: change rows still to come after this page
+// (the app shows "Receiving 800 of 2853…").
+function pull_(since, deviceId, forMain, who, limit) {
   who = who || { deviceId: deviceId, forMain: !!forMain, admin: !!forMain };
   if (forMain) who.forMain = true;
+  const seqNow = Number(props_().getProperty('SEQ') || '0');
+  if (seqNow > 0 && since >= seqNow) return { ok: true, records: [], next: since, more: false, left: 0 };
   const changes = sheet_('Changes', CHANGES_HEADER);
   const last = changes.getLastRow();
   const start = last >= 2 ? firstAfter_(changes, since, last) : 2;
-  if (start > last) return { ok: true, records: [], next: since, more: false };
-  const count = Math.min(PULL_LIMIT, last - start + 1);
+  if (start > last) return { ok: true, records: [], next: since, more: false, left: 0 };
+  const count = Math.min(limit > 0 ? Math.max(50, Math.min(PULL_LIMIT, limit)) : PULL_LIMIT, last - start + 1);
   const list = changes.getRange(start, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
   const want = [];
   const seen = {};
@@ -981,13 +1131,35 @@ function pull_(since, deviceId, forMain, who) {
     out.push(rec);
   }
   const next = used > 0 ? Number(list[used - 1][0]) || since : since;
-  return { ok: true, records: out, next: next, more: start + used <= last };
+  return { ok: true, records: out, next: next, more: start + used <= last, left: Math.max(0, last - (start + used) + 1), page: used };
 }
 
 // ================================================================ devices & invites
+// 1.0.0 build 10: the Devices sheet is read on every request (who is asking): its rows are kept in the script cache,
+// stamped with a version number in Script properties (DEVROWS_V) that every write to the sheet moves on – a copy made
+// before a write is never used after it. A request reads the sheet at most once.
+function deviceRows_() {
+  if (REQ_.devRows) return REQ_.devRows;
+  const p = props_();
+  const v = p.getProperty('DEVROWS_V') || '0';
+  let cache = null;
+  try { cache = CacheService.getScriptCache(); } catch (e) { cache = null; }
+  if (cache) {
+    try { const c = JSON.parse(cache.get('DEVROWS') || 'null'); if (c && c.v === v && Array.isArray(c.rows)) { REQ_.devRows = c.rows; REQ_.devCached = true; return c.rows; } } catch (e) { /* read the sheet */ }
+  }
+  const rows = values_(sheet_('Devices', DEVICE_HEADER));
+  REQ_.devRows = rows;
+  if (cache) { try { const txt = JSON.stringify({ v: v, rows: rows }); if (txt.length < 90000) cache.put('DEVROWS', txt, 600); } catch (e) { /* too big: read each time */ } }
+  return rows;
+}
+function devicesChanged_() {
+  const p = props_();
+  p.setProperty('DEVROWS_V', String((Number(p.getProperty('DEVROWS_V') || '0') || 0) + 1));
+  REQ_.devRows = null;
+}
 function devices_() {
   const all = ctlAll_();
-  return values_(sheet_('Devices', DEVICE_HEADER)).map(function (r) {
+  return deviceRows_().map(function (r) {
     const c = all[String(r[0])] || {};
     return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8],
       until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
@@ -995,24 +1167,32 @@ function devices_() {
       admin: isAdminDevice_(String(r[0]), /cloud key/.test(String(r[9] || ''))), adminMarked: !!c.admin, signs: c.signs || null };
   });
 }
+// found.sh: the sheet, opened only when something is written (the caller then calls devicesChanged_()).
 function findDevice_(match) {
-  const sh = sheet_('Devices', DEVICE_HEADER);
-  const rows = values_(sh);
-  for (let i = 0; i < rows.length; i++) if (match(rows[i])) return { sh: sh, row: i + 2, v: rows[i] };
+  const rows = deviceRows_();
+  for (let i = 0; i < rows.length; i++) if (match(rows[i])) return { get sh() { return sheet_('Devices', DEVICE_HEADER); }, row: i + 2, v: rows[i] };
   return null;
 }
+// 1.0.0 build 10: last seen is written at most every 2 minutes per device (and when its name, kind or app changes) –
+// it used to be three writes on every request from every device.
+const TOUCH_EVERY_MS = 2 * 60000;
 function touchDevice_(body, deviceId, extra) {
   const d = body.device || {};
   const found = findDevice_(function (r) { return String(r[0]) === String(deviceId); });
   const now = now_();
   if (found) {
-    found.sh.getRange(found.row, 2, 1, 1).setValue(d.name || found.v[1]);
-    found.sh.getRange(found.row, 3, 1, 1).setValue(d.kind || found.v[2]);
-    found.sh.getRange(found.row, 7, 1, 2).setValues([[now, body.app || '']]);
+    const name = d.name || found.v[1]; const kind = d.kind || found.v[2]; const app = body.app || '';
+    const seen = Date.parse(String(found.v[6] || '').replace(' ', 'T'));
+    const fresh = isFinite(seen) && Date.now() - seen < TOUCH_EVERY_MS && Date.now() - seen >= 0;
+    if (fresh && String(name) === String(found.v[1]) && String(kind) === String(found.v[2]) && String(app) === String(found.v[7])) return found;
+    found.sh.getRange(found.row, 2, 1, 2).setValues([[name, kind]]);
+    found.sh.getRange(found.row, 7, 1, 2).setValues([[now, app]]);
+    devicesChanged_();
     return found;
   }
   sheet_('Devices', DEVICE_HEADER).appendRow([deviceId, d.name || 'Device', d.kind || '', (extra && extra.status) || 'active',
     (extra && extra.tokenHash) || '', now, now, body.app || '', (extra && extra.invitedBy) || '', (extra && extra.note) || '']);
+  devicesChanged_();
   return null;
 }
 
@@ -1060,7 +1240,7 @@ function auth_(body) {
   if (!d) {
     // The cloud key is not a pass for any number of new devices: the first device holding it is the main tablet;
     // another new device with the key waits until the owner approves it (Admin › Devices).
-    const others = values_(sheet_('Devices', DEVICE_HEADER)).filter(function (r) { return /cloud key/.test(String(r[9] || '')) && String(r[3]) === 'active'; });
+    const others = deviceRows_().filter(function (r) { return /cloud key/.test(String(r[9] || '')) && String(r[3]) === 'active'; });
     if (others.length) {
       touchDevice_(body, id, { status: 'waiting', note: 'asked with the cloud key' });
       log_('Refused', [id, 'new device with the cloud key – waiting for the owner']);
@@ -1086,7 +1266,7 @@ function checkSig_(body, id, passHash, strict) {
   if (!passHash || String(body.sig) !== sign_(passHash, id, body)) return { ok: false, why: 'bad signature', error: 'The request was not signed with this device\'s pass. Refused. Link the device again if this keeps happening.' };
   const t = Date.parse(String(body.sentAt || '').replace(' ', 'T'));
   if (!isFinite(t) || Math.abs(Date.now() - t) > 7 * 86400000) return { ok: false, why: 'old request', error: 'The request is too old, or the date on this device is wrong. Check the date and time on this device.' };
-  if (!c.signs) { const all = ctlAll_(); ctl_(all, id).signs = now_(); ctlSave_(all); }
+  if (!c.signs) { const all = ctlAll_(); ctl_(all, id).signs = now_(); ctlSaveSafe_(all); }
   return null;
 }
 
@@ -1114,11 +1294,14 @@ function linkCode_(url, code) {
 function inviteCreate_(body, who) {
   const code = code_(8);
   const created = new Date();
-  const expires = new Date(created.getTime() + INVITE_HOURS * 3600000);
+  // 1.0.0 build 10 ("Add a phone" on Home): one QR code for several staff phones in one go – up to 5 devices, for 1 hour
+  const uses = Math.max(1, Math.min(5, Math.floor(Number(body.uses) || 1)));
+  const hours = Math.max(0.25, Math.min(INVITE_HOURS, Number(body.hours) || INVITE_HOURS));
+  const expires = new Date(created.getTime() + hours * 3600000);
   const email = String(body.email || '').trim();
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'That email address does not look right.' };
   const url = String(body.url || '');
-  sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), esc_((body.by || '') + ' @ ' + who.deviceId), email, '', '']);
+  sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), esc_((body.by || '') + ' @ ' + who.deviceId), email, '', '', uses, 0, '']);
   // 1.0.0 build 1: an invite for the owner's / an admin's own phone makes it an admin device when it joins.
   if (body.adminDevice) { const p = props_(); let l = []; try { l = JSON.parse(p.getProperty('INVITE_ADMIN') || '[]'); } catch (e) { l = []; } p.setProperty('INVITE_ADMIN', JSON.stringify(l.concat([code]).slice(-20))); }
   const link = linkCode_(url, code);
@@ -1136,7 +1319,21 @@ function inviteCreate_(body, who) {
     });
     emailed = true;
   }
-  return { ok: true, code: code, linkCode: link, linkUrl: url ? linkUrl_(url, link) : '', expires: expires.toISOString(), emailed: emailed };
+  return { ok: true, code: code, linkCode: link, linkUrl: url ? linkUrl_(url, link) : '', expires: expires.toISOString(), emailed: emailed, uses: uses };
+}
+// The owner cancels an invite (the QR code stops working at once).
+function inviteCancel_(body, who) {
+  const code = String(body.code || '').trim().toUpperCase();
+  return withLock_(function () {
+    const sh = sheet_('Invites', INVITE_HEADER);
+    const rows = values_(sh);
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]) !== code) continue;
+      sh.getRange(i + 2, 10, 1, 1).setValues([[now_() + ' by ' + esc_(String(body.by || '') + ' @ ' + who.deviceId)]]);
+      return { ok: true, cancelled: code };
+    }
+    return { ok: false, error: 'Invite not found.' };
+  }, 5000);
 }
 
 // New device: swap the invite for its own access token.
@@ -1150,7 +1347,8 @@ function join_(body) {
   const bad = cache ? Number(cache.get('join_bad_' + hour) || '0') : 0;
   if (bad >= 30) return { ok: false, error: 'Too many wrong invite codes – try again in an hour.' };
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return { ok: false, error: 'Busy – try again in a moment.' };
+  if (!lock.tryLock(5000)) return busyReply_(); // 1.0.0 build 10: the app tries again by itself
+  REQ_.locked = (REQ_.locked || 0) + 1; // logs and security events wait until the lock is let go
   try {
     const sh = sheet_('Invites', INVITE_HEADER);
     const rows = values_(sh);
@@ -1162,23 +1360,48 @@ function join_(body) {
       return { ok: false, error: 'Invite not found. Ask for a new one.' };
     }
     const inv = rows[row];
-    if (inv[5]) return { ok: false, error: 'This invite has already been used. Ask for a new one.' };
-    if (new Date(inv[2]).getTime() < Date.now()) return { ok: false, error: 'This invite has expired. Ask for a new one.' };
     const d = body.device || {};
     if (!d.id || !/^[A-Za-z0-9._:-]{3,80}$/.test(String(d.id))) return { ok: false, error: 'Device id missing.' };
     const token = Utilities.getUuid() + Utilities.getUuid();
-    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
     const existing = findDevice_(function (r) { return String(r[0]) === String(d.id); });
+    // 1.0.0 build 10: the phone asked again after its first try ran out of time (the join had gone through, the answer was
+    // lost): the same join (its nonce, with this invite) within 10 minutes gets a fresh pass instead of "already linked"
+    // or "already used" – checked before the invite's uses, since that try already counted.
+    const nonceH = body.nonce ? sha_(String(body.nonce)) : '';
+    if (existing && nonceH && String(existing.v[3]) !== 'removed') {
+      const cj = ctlAll_()[String(d.id)] || {};
+      if (cj.joinNonce === nonceH && cj.joinCode === code && Date.now() - Number(cj.joinAt || 0) < 10 * 60000) {
+        existing.sh.getRange(existing.row, 5, 1, 1).setValues([[sha_(token)]]);
+        devicesChanged_();
+        return { ok: true, token: token, approved: String(existing.v[3]) === 'active', admin: !!cj.admin, again: true };
+      }
+    }
+    const uses = Math.max(1, Number(inv[7]) || 1);
+    const usedN = Number(inv[8]) || (inv[5] ? 1 : 0);
+    if (inv[9]) return { ok: false, error: 'The owner cancelled this invite. Ask for a new QR code.' };
+    if (usedN >= uses) return { ok: false, error: uses > 1 ? 'This QR code has been used by ' + uses + ' phones already. Ask for a new one.' : 'This invite has already been used. Ask for a new one.' };
+    if (new Date(inv[2]).getTime() < Date.now()) return { ok: false, error: 'This invite has expired. Ask for a new one.' };
+    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
     if (existing && String(existing.v[3]) !== 'removed' && String(existing.v[4] || '')) { log_('Refused', [String(d.id), 'join with a device id already linked']); return { ok: false, error: 'A device with this id is already linked. Remove the old one first (Admin › Devices).' }; }
-    if (existing) existing.sh.getRange(existing.row, 4, 1, 2).setValues([[approval ? 'waiting' : 'active', sha_(token)]]);
+    if (existing) { existing.sh.getRange(existing.row, 4, 1, 2).setValues([[approval ? 'waiting' : 'active', sha_(token)]]); devicesChanged_(); }
     else touchDevice_(body, String(d.id), { status: approval ? 'waiting' : 'active', tokenHash: sha_(token), invitedBy: inv[3], note: 'invite ' + code });
-    sh.getRange(row + 2, 6, 1, 2).setValues([[now_(), String(d.id)]]);
+    // 1.0.0 build 10: an invite for several phones counts them (used_by: the devices, newest last)
+    const by = usedN ? String(inv[6] || '') + ',' + String(d.id) : String(d.id);
+    sh.getRange(row + 2, 6, 1, 4).setValues([[inv[5] || now_(), esc_(by.slice(-400)), uses, usedN + 1]]);
     let adminList = [];
     try { adminList = JSON.parse(props_().getProperty('INVITE_ADMIN') || '[]'); } catch (e) { adminList = []; }
-    if (adminList.indexOf(code) >= 0) { const all = ctlAll_(); const c = ctl_(all, String(d.id)); c.admin = true; hist_(c, 'Joined as an admin device (owner\'s invite)', inv[3]); ctlSave_(all); }
+    // one save for the device's control note (never stops the join: the device is linked already)
+    const all0 = ctlAll_();
+    if (adminList.indexOf(code) >= 0 || nonceH || (all0[String(d.id)] && all0[String(d.id)].removedAt)) {
+      const all = all0; const c = ctl_(all, String(d.id));
+      delete c.removedAt;
+      if (adminList.indexOf(code) >= 0) { c.admin = true; hist_(c, 'Joined as an admin device (owner\'s invite)', inv[3]); }
+      if (nonceH) { c.joinNonce = nonceH; c.joinCode = code; c.joinAt = Date.now(); }
+      ctlSaveSafe_(all);
+    }
     secEvent_('device', { device: String(d.name || d.id), what: 'A new device joined with an invite' + (approval ? ' – it waits for your approval' : '') + (adminList.indexOf(code) >= 0 ? ' (as an admin device)' : ''), refused: false });
     return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0 };
-  } finally { lock.releaseLock(); }
+  } finally { lock.releaseLock(); REQ_.locked -= 1; }
 }
 
 function deviceStatus_(id, status, who) {
@@ -1187,24 +1410,60 @@ function deviceStatus_(id, status, who) {
   const d = findDevice_(function (r) { return String(r[0]) === String(id); });
   if (!d) return { ok: false, error: 'Device not found.' };
   d.sh.getRange(d.row, 4).setValue(status);
+  devicesChanged_();
   return { ok: true, devices: devices_() };
 }
 
 // ---------------------------------------------------------------- v3.6 device control (Admin › Devices)
 // Kept in a script property: { [deviceId]: { until, endDate, shop, roles, name, cmds: [], hist: [], attempts: [], stat, wipe, removedTokens } }.
 function ctlAll_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('DEVCTL') || '{}'); } catch (e) { return {}; } }
-function ctlSave_(all) { PropertiesService.getScriptProperties().setProperty('DEVCTL', JSON.stringify(all)); }
+// 1.0.0 build 10 (review): DEVCTL is ONE Script property, and a property value over 9 KB cannot be saved (setProperty
+// throws – every pull and join then failed). Before each save it is kept small: devices removed more than 30 days ago
+// are forgotten, 8 history lines and 5 attempts per device, the join fields (the lost-answer check) only for 10 minutes;
+// if it is still too big, removed devices go first, then the older history.
+const CTL_MAX_BYTES = 8500;
+const CTL_HIST = 8;
+const CTL_ATTEMPTS = 5;
+const bytes_ = function (s) { try { return unescape(encodeURIComponent(s)).length; } catch (e) { return String(s).length * 3; } };
+function ctlPrune_(all) {
+  const now = Date.now();
+  Object.keys(all).forEach(function (id) {
+    const c = all[id];
+    if (!c || typeof c !== 'object') { delete all[id]; return; }
+    const gone = c.removedAt ? Date.parse(String(c.removedAt)) : NaN;
+    if (Number.isFinite(gone) && now - gone > 30 * 86400000) { delete all[id]; return; }
+    if (c.joinAt !== undefined && !(now - Number(c.joinAt || 0) < 10 * 60000)) { delete c.joinNonce; delete c.joinCode; delete c.joinAt; }
+    c.hist = (c.hist || []).slice(0, CTL_HIST).map(function (h) { return { at: h.at, text: String(h.text || '').slice(0, 140), by: String(h.by || '').slice(0, 80) }; });
+    c.attempts = (c.attempts || []).slice(0, CTL_ATTEMPTS);
+    c.cmds = (c.cmds || []).slice(-10);
+    if (c.removedTokens) c.removedTokens = c.removedTokens.slice(-3);
+  });
+  let s = JSON.stringify(all);
+  if (bytes_(s) <= CTL_MAX_BYTES) return s;
+  // still too big: removed devices go (oldest first), then shorter history and attempts everywhere
+  const removed = Object.keys(all).filter(function (id) { return all[id].removedAt; }).sort(function (a, b) { return String(all[a].removedAt).localeCompare(String(all[b].removedAt)); });
+  for (let i = 0; i < removed.length && bytes_(s) > CTL_MAX_BYTES; i++) { delete all[removed[i]]; s = JSON.stringify(all); }
+  [3, 1, 0].forEach(function (n) {
+    if (bytes_(s) <= CTL_MAX_BYTES) return;
+    Object.keys(all).forEach(function (id) { all[id].hist = (all[id].hist || []).slice(0, n); all[id].attempts = (all[id].attempts || []).slice(0, Math.min(n, 2)); });
+    s = JSON.stringify(all);
+  });
+  return s;
+}
+function ctlSave_(all) { PropertiesService.getScriptProperties().setProperty('DEVCTL', ctlPrune_(all)); }
+// A save that never stops the request (a pull, a join, a refused request noting an attempt).
+function ctlSaveSafe_(all) { try { ctlSave_(all); return true; } catch (e) { log_('Problems', ['DEVCTL not saved', String(e && e.message || e).slice(0, 200)]); return false; } }
 function ctl_(all, id) { all[id] = all[id] || { cmds: [], hist: [], attempts: [] }; return all[id]; }
-function hist_(c, text, by) { c.hist = [{ at: now_(), text: text, by: by || '' }].concat(c.hist || []).slice(0, 25); }
+function hist_(c, text, by) { c.hist = [{ at: now_(), text: String(text || '').slice(0, 140), by: String(by || '').slice(0, 80) }].concat(c.hist || []).slice(0, CTL_HIST); }
 function noteAttempt_(id, why) {
   const all = ctlAll_(); const c = ctl_(all, id);
-  c.attempts = [{ at: now_(), why: why }].concat(c.attempts || []).slice(0, 10);
-  ctlSave_(all);
+  c.attempts = [{ at: now_(), why: why }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS);
+  ctlSaveSafe_(all);
 }
 function noteAttemptByToken_(h) {
   const all = ctlAll_();
-  Object.keys(all).forEach(function (id) { if ((all[id].removedTokens || []).indexOf(h) >= 0) { const c = all[id]; c.attempts = [{ at: now_(), why: 'removed' }].concat(c.attempts || []).slice(0, 10); } });
-  ctlSave_(all);
+  Object.keys(all).forEach(function (id) { if ((all[id].removedTokens || []).indexOf(h) >= 0) { const c = all[id]; c.attempts = [{ at: now_(), why: 'removed' }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS); } });
+  ctlSaveSafe_(all);
 }
 // Refuse a suspended, ended or wiped device (enforced here, whatever the device does).
 function gate_(id, d) {
@@ -1212,35 +1471,50 @@ function gate_(id, d) {
   const c = all[id];
   if (!c) return null;
   if (c.wipe === 'pending') {
-    c.wipe = 'done'; hist_(c, 'Wiped (the device cleared its data)', 'cloud');
-    if (d && d.sh) { c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); }
-    ctlSave_(all);
+    c.wipe = 'done'; c.removedAt = now_(); hist_(c, 'Wiped (the device cleared its data)', 'cloud');
+    if (d && d.sh) { c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); devicesChanged_(); }
+    ctlSaveSafe_(all);
     return { ok: false, wipe: true, removed: true, error: 'The owner wiped this device.' };
   }
   const nowIso = now_();
   if (c.until) {
-    if (c.until > nowIso) { c.attempts = [{ at: nowIso, why: 'suspended' }].concat(c.attempts || []).slice(0, 10); ctlSave_(all); return { ok: false, lock: { kind: 'suspended', until: c.until }, error: 'Access paused by the owner until ' + c.until.slice(0, 16).replace('T', ' ') + '.' }; }
-    delete c.until; hist_(c, 'Pause ended', 'cloud'); ctlSave_(all);
+    if (c.until > nowIso) { c.attempts = [{ at: nowIso, why: 'suspended' }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS); ctlSaveSafe_(all); return { ok: false, lock: { kind: 'suspended', until: c.until }, error: 'Access paused by the owner until ' + c.until.slice(0, 16).replace('T', ' ') + '.' }; }
+    delete c.until; hist_(c, 'Pause ended', 'cloud'); ctlSaveSafe_(all);
   }
   if (c.endDate && c.endDate < nowIso.slice(0, 10)) {
-    c.attempts = [{ at: nowIso, why: 'ended' }].concat(c.attempts || []).slice(0, 10); ctlSave_(all);
+    c.attempts = [{ at: nowIso, why: 'ended' }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS); ctlSaveSafe_(all);
     return { ok: false, lock: { kind: 'ended', until: c.endDate }, error: 'Access for this device ended on ' + c.endDate + '.' };
   }
   return null;
 }
 // What the device reports on each pull (waiting items, last health check / backup / login), and what it is told back.
+// 1.0.0 build 10: written only when there is something new (commands handed over, or the device's figures changed /
+// are more than 5 minutes old) – every pull from every device used to rewrite the whole device-control property.
 function devicePulled_(id, body, out) {
   const all = ctlAll_(); const c = ctl_(all, id);
-  if (body.stat) c.stat = { at: now_(), pending: body.stat.pending, health: body.stat.health || null, backup: body.stat.backup || null, login: body.stat.login || null };
+  let dirty = (c.cmds || []).length > 0;
+  if (body.stat) {
+    const st = { at: now_(), pending: body.stat.pending, health: body.stat.health || null, backup: body.stat.backup || null, login: body.stat.login || null };
+    const was = c.stat || {};
+    const same = JSON.stringify([was.pending, was.health, was.backup, was.login]) === JSON.stringify([st.pending, st.health, st.backup, st.login]);
+    const age = Date.now() - Date.parse(String(was.at || ''));
+    if (!same || !(age < 5 * 60000)) { c.stat = st; dirty = true; }
+  }
   // 1.0.0 build 1: a device clock an hour or more out, or a time zone that is not Fiji's, may be tampering.
   // 1.0.0 hardening: more than 5 minutes out (the app stops money work then), or a time zone that is not Fiji
-  if (body.stat && ((Math.abs(Number(body.stat.clockSkewMin) || 0) > 5) || (body.stat.tz && !/Fiji|^\+1[23]|^UTC\+12/.test(String(body.stat.tz))))) {
+  if (body.stat && ((Math.abs(Number(body.stat.clockSkewMin) || 0) > 5) || (body.stat.tz && !/Fiji|^\+1[23]|^UTC\+12/.test(String(body.stat.tz)))) && !onceIn_('clock_' + id, 3600)) {
     secEvent_('clock', { device: String(c.name || id), what: 'Clock ' + (Number(body.stat.clockSkewMin) || 0) + ' minutes from Google\'s time; time zone ' + String(body.stat.tz || 'not said'), refused: false });
   }
   out.control = { shop: c.shop || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
   out.commands = c.cmds || [];
   c.cmds = [];
-  ctlSave_(all);
+  // 1.0.0 build 10 (review): a pull never fails because the device-control note could not be saved
+  if (dirty) ctlSaveSafe_(all);
+}
+// True when the same thing was already noted within `secs` (script cache); notes it otherwise.
+function onceIn_(key, secs) {
+  try { const cache = CacheService.getScriptCache(); if (cache.get('once_' + key)) return true; cache.put('once_' + key, '1', secs); } catch (e) { /* no cache: not limited */ }
+  return false;
 }
 const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin'];
 function deviceControl_(body, who) {
@@ -1258,8 +1532,8 @@ function deviceControl_(body, who) {
       if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(until)) return { ok: false, error: 'Until when? Choose a date and time.' };
       c.until = until; hist_(c, 'Paused until ' + until.slice(0, 16).replace('T', ' '), by);
     } else if (a === 'block') { d.sh.getRange(d.row, 4).setValue('blocked'); hist_(c, 'Blocked', by); }
-    else if (a === 'allow') { d.sh.getRange(d.row, 4).setValue('active'); delete c.until; if (c.endDate && c.endDate < now_().slice(0, 10)) delete c.endDate; hist_(c, 'Allowed again', by); }
-    else if (a === 'remove') { c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); hist_(c, 'Removed (must be linked again with a new invite)', by); }
+    else if (a === 'allow') { d.sh.getRange(d.row, 4).setValue('active'); delete c.until; delete c.removedAt; if (c.endDate && c.endDate < now_().slice(0, 10)) delete c.endDate; hist_(c, 'Allowed again', by); }
+    else if (a === 'remove') { c.removedAt = now_(); c.removedTokens = (c.removedTokens || []).concat([String(d.v[4])]).slice(-5); d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); hist_(c, 'Removed (must be linked again with a new invite)', by); }
     else if (a === 'rename') { const n = String(body.name || '').trim(); if (!n) return { ok: false, error: 'Type the new name.' }; c.name = n; d.sh.getRange(d.row, 2).setValue(n); hist_(c, 'Renamed to ' + n, by); }
     else if (a === 'shop') { c.shop = String(body.shop || '') || null; hist_(c, 'Shop set to ' + (c.shop || 'none'), by); }
     else if (a === 'roles') { c.roles = (body.roles || []).map(String); hist_(c, c.roles.length ? 'Only these roles may log in: ' + c.roles.join(', ') : 'Every role may log in', by); }
@@ -1268,6 +1542,7 @@ function deviceControl_(body, who) {
     else if (a === 'admin') { c.admin = !!body.on; hist_(c, c.admin ? 'Marked as an admin device (roles, PINs and locked settings may be changed on it)' : 'No longer an admin device', by); }
     else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
     ctlSave_(all);
+    if (['block', 'allow', 'remove', 'rename'].indexOf(a) >= 0) devicesChanged_();
     if (['wipe', 'remove', 'block', 'allow', 'admin'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
     return { ok: true, devices: devices_() };
   });
@@ -1275,7 +1550,7 @@ function deviceControl_(body, who) {
 function problemLogSave_(body, who) {
   const text = String(body.text || '').slice(0, 45000);
   sheet_('Problem logs', ['at', 'device', 'text']).appendRow([now_(), who.deviceId, text]);
-  const all = ctlAll_(); const c = ctl_(all, who.deviceId); c.lastLog = now_(); hist_(c, 'Sent its problem log', 'device'); ctlSave_(all);
+  const all = ctlAll_(); const c = ctl_(all, who.deviceId); c.lastLog = now_(); hist_(c, 'Sent its problem log', 'device'); ctlSaveSafe_(all);
   return { ok: true };
 }
 function problemLogGet_(id) {
@@ -1329,13 +1604,13 @@ function linkCheck_(body) {
       try { out[k] = JSON.parse(JSON.parse(String(sh.getRange(rowNo, 5, 1, 1).getValues()[0][0] || '{}')).data || 'null'); } catch (e) { out[k] = null; }
     });
   }
-  out.devices = values_(sheet_('Devices', DEVICE_HEADER)).filter(function (r) { return String(r[3]) === 'active' && !/^(bridge-|first-device)/.test(String(r[0])); })
+  out.devices = deviceRows_().filter(function (r) { return String(r[3]) === 'active' && !/^(bridge-|first-device)/.test(String(r[0])); })
     .map(function (r) { return { name: String(r[1]), last_seen: text_(r[6]) }; });
   return out;
 }
 
 // Run once from the editor: creates the data spreadsheet and the main-software key.
-function setup() {
+function setupRun_() {
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('MAIN_KEY')) props.setProperty('MAIN_KEY', Utilities.getUuid() + Utilities.getUuid());
   data_();
@@ -1378,6 +1653,7 @@ function freshStart_(body) {
       sh.getRange(2, 1, rows.length, sh.getLastColumn()).clearContent();
       if (keep.length) sh.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
     });
+    forgetValues_();
     PropertiesService.getScriptProperties().setProperty('FRESH', JSON.stringify({ id: String(body.id || ''), at: at, tables: tables }));
     let moved = 0;
     if (body.moveFiles) {
@@ -2116,6 +2392,7 @@ function migratePins_() {
         n += 1;
       });
     }
+    forgetValues_('T_users');
     p.setProperty('PINS_HASHED', '2');
     if (n) log_('PINs hashed', [n]);
     // Records of the locked kinds already in the cloud before script 12 count as the owner's (they were made by the
@@ -2134,7 +2411,7 @@ function migratePins_() {
     return n;
   } finally { lock.releaseLock(); }
 }
-function hashPins() { props_().deleteProperty('PINS_HASHED'); Logger.log('PINs hashed: ' + migratePins_()); }
+function hashPinsRun_() { props_().deleteProperty('PINS_HASHED'); Logger.log('PINs hashed: ' + migratePins_()); }
 
 function cloudUser_(uid) {
   const sh = data_().getSheetByName('T_users');
@@ -2404,6 +2681,7 @@ function mail_(opts, essential) {
 const SECLOG_HEADER = ['at_fiji', 'kind', 'device', 'person', 'shop', 'what', 'todo'];
 function secEvent_(kind, info) {
   info = info || {};
+  if (REQ_.locked) { later_(function () { secEvent_(kind, info); }); return false; } // 1.0.0 build 10: never inside the lock
   try {
     const row = [fijiNow_(), kind, esc_(String(info.device || '')), esc_(String(info.person || '')), esc_(String(info.shop || '')), esc_(String(info.what || '').slice(0, 1500)), esc_(SEC_TODO[kind] || '')];
     sheet_('SecurityLog', SECLOG_HEADER).appendRow(row);
@@ -2439,7 +2717,7 @@ function failCount_(kind, key, info) {
   if (n === 5) secEvent_('login_fail', info);
 }
 // The daily summary (7:00 am Fiji): every security event and crash report of the last 24 hours, or "all quiet".
-function securityDigest() {
+function securityDigestRun_() {
   const since = Utilities.formatDate(new Date(Date.now() - 86400000), 'Pacific/Fiji', 'yyyy-MM-dd HH:mm');
   const ss = data_();
   const sec = ss.getSheetByName('SecurityLog') ? values_(ss.getSheetByName('SecurityLog')).filter(function (r) { return String(r[0]) >= since; }) : [];
@@ -2477,7 +2755,7 @@ function historyChain_(entries) {
   p.setProperty('HIST_FP', fp);
 }
 // Run from the editor: is the history unbroken? (every entry's fingerprint follows from the one before)
-function checkHistory() {
+function checkHistoryRun_() {
   const ss = data_();
   const t = ss.getSheetByName('T_audit_log'); const c = ss.getSheetByName('History chain');
   if (!t || !c) return { ok: true, entries: 0 };
@@ -2493,6 +2771,9 @@ function esc_(v) { const s = v === null || v === undefined ? '' : String(v); ret
 function unesc_(s) { return /^'[=+\-@]/.test(s) ? s.slice(1) : s; }
 
 // What a device may receive of a record (owner / admin PIN hashes, bank details and face data stay with admin devices).
+// The fields a device that is not an admin device does not get (and whose empty copy never wipes the cloud's: push_).
+const MASKED_TABLES = ['pay_profiles', 'ap_suppliers', 'staff_details'];
+const MASKED_FIELD = /bank|account_no|tin$/;
 function forDevice_(table, row, key, who) {
   if (!row || who.forMain) return row;
   const admin = !!who.admin;
@@ -2508,8 +2789,8 @@ function forDevice_(table, row, key, who) {
     if (!admin) { if (!devShop || String(out.shop_code || '') !== devShop) { out.face = null; } }
     return out;
   }
-  if (!admin && (table === 'pay_profiles' || table === 'ap_suppliers' || table === 'staff_details')) {
-    const out = {}; Object.keys(row).forEach(function (k) { out[k] = /bank|account_no|tin$/.test(k) && k !== 'on_account' ? null : row[k]; });
+  if (!admin && MASKED_TABLES.indexOf(table) >= 0) {
+    const out = {}; Object.keys(row).forEach(function (k) { out[k] = MASKED_FIELD.test(k) && k !== 'on_account' ? null : row[k]; });
     return out;
   }
   return row;
@@ -2636,7 +2917,7 @@ function rotateMainKey() { props_().setProperty('MAIN_KEY', Utilities.getUuid() 
 
 // ---------------------------------------------------------------- Changes sheet: compact (keep the newest entry per record)
 // Run from the editor or a monthly trigger. Pull positions are change numbers (seq), so devices carry on where they were.
-function compactChanges() {
+function compactChangesRun_() {
   return withLock_(function () {
     const sh = sheet_('Changes', CHANGES_HEADER);
     const last = sh.getLastRow();
@@ -2900,8 +3181,132 @@ function tidyRecords_(maxMs) {
   return { ok: true, moved: moved, left: left, more: more };
 }
 // Run from the script editor (Run › tidyRecords) – again until the log says "done".
-function tidyRecords() {
+function tidyRecordsRun_() {
   const r = tidyRecords_();
   Logger.log('Moved ' + r.moved + ', left where they are ' + r.left + (r.more ? ' – run again for the rest.' : ' – done.'));
   return r;
+}
+
+
+// ================================================================ 1.0.0 build 10: job leases (owner, 2 Nov: "It needs all the
+// devices to allow sync instead of the main tablet")
+// The jobs only one device should do at a time (bringing in the till PCs' products / suppliers / staff credit / FCCC,
+// the automatic Viber posts, the web checks, the accountant pack, the nightly backup) go to whichever linked device asks
+// first: it holds the job for ttlSec and keeps it by asking again on each sync; when it stops asking, the job is free
+// after ttlSec and the next device that asks takes it. The main device chosen in Admin (shared setting
+// main_tablet_device) comes first: it takes a job from an ordinary device. An admin device comes before a staff phone.
+// The backup and the accountant pack need the whole data, so only admin devices (and the main device) are given those.
+// mark: a short note the holder keeps with the job (the day of the last backup, the month of the last pack), so the next
+// holder does not do it again. Kept in Script properties (LEASES).
+const LEASE_ADMIN_JOBS = ['backup', 'pack'];
+// 1.0.0 build 10 (review): only the app's own jobs (anything else is refused, never kept)
+const LEASE_JOBS = ['link', 'viber', 'web', 'pack', 'backup'];
+function leasesAll_() { try { const o = JSON.parse(props_().getProperty('LEASES') || '{}'); return o && typeof o === 'object' ? o : {}; } catch (e) { return {}; } }
+// A job held by another device is NEVER taken while its time runs (two devices doing the Aronium products at once made
+// the same products twice). The main device / an admin device only comes first for a free job: asking for a job a
+// lower device holds puts it next in line (want) – the holder is not renewed any more (it stops at its next check) and
+// the job goes to the waiting device once the holder's time is up. A want older than twice the job's time is forgotten.
+function jobLease_(body, who) {
+  const list = Array.isArray(body.jobs) ? body.jobs : [{ job: body.job, ttlSec: body.ttlSec, mark: body.mark, release: body.release }];
+  const jobs = list.filter(function (x) { return x && LEASE_JOBS.indexOf(String(x.job || '')) >= 0; }).slice(0, 12);
+  if (!jobs.length || jobs.length !== list.filter(function (x) { return x; }).slice(0, 12).length) return { ok: false, error: 'Which job? Only ' + LEASE_JOBS.join(', ') + '.' };
+  let main = '';
+  try { main = String(sharedSetting_('main_tablet_device') || ''); } catch (e) { main = ''; }
+  const me = String(who.deviceId);
+  const prio = main && main === me ? 2 : (who.admin ? 1 : 0);
+  let name = me;
+  try { const r = deviceRows_().filter(function (x) { return String(x[0]) === me; })[0]; if (r && r[1]) name = String(r[1]); } catch (e) { /* the id */ }
+  return withLock_(function () {
+    const all = leasesAll_();
+    const now = Date.now();
+    const out = {};
+    jobs.forEach(function (x) {
+      const job = String(x.job);
+      const ttl = Math.max(30, Math.min(3600, Number(x.ttlSec) || 600)) * (prio === 2 ? 2 : 1);
+      const cur = all[job] || null;
+      const live = cur && Number(cur.until) > now;
+      const mine = live && String(cur.holder) === me;
+      const markOf = function () { return cur ? cur.mark || '' : ''; };
+      if (x.release) {
+        if (mine) { cur.until = now; }
+        out[job] = { granted: false, holder: live && !mine ? cur.holder : '', holderName: live && !mine ? cur.name : '', until: null, mark: markOf() };
+        return;
+      }
+      // the backup and the accountant pack: an admin device only (being the main device is not enough – they need the
+      // whole data). Not asked again for the job's time (staff phones used to ask under the write lock on every sync).
+      if (LEASE_ADMIN_JOBS.indexOf(job) >= 0 && !who.admin) {
+        out[job] = { granted: false, holder: live ? cur.holder : '', holderName: live ? cur.name : '', until: new Date(now + ttl * 1000).toISOString(), untilMs: now + ttl * 1000, mark: markOf(), why: 'admin device only' };
+        return;
+      }
+      const want = cur && cur.want && now - Number(cur.want.at || 0) < 2 * ttl * 1000 ? cur.want : null;
+      const wantOther = want && String(want.holder) !== me && Number(want.prio) > prio ? want : null;
+      let take;
+      if (mine) take = !(want && String(want.holder) !== me && Number(want.prio) > (Number(cur.prio) || 0)); // handing over: not renewed
+      else if (live) take = false;                                                                           // never taken while it runs
+      else take = !wantOther;                                                                                // free: the device waiting first
+      if (take) {
+        const mark = x.mark !== undefined && x.mark !== null && String(x.mark) !== '' ? String(x.mark).slice(0, 60) : markOf();
+        all[job] = { holder: me, name: String(name).slice(0, 60), prio: prio, until: now + ttl * 1000, since: mine ? cur.since : now, mark: mark, at: now };
+        if (want && !wantOther && String(want.holder) !== me) all[job].want = want; // a lower / equal device waiting: kept, it gets nothing earlier
+        out[job] = { granted: true, holder: me, holderName: all[job].name, until: new Date(all[job].until).toISOString(), untilMs: all[job].until, mark: mark, took: !!(cur && String(cur.holder) !== me) };
+        return;
+      }
+      if (mine) {
+        // handing over to a device that comes first: this one stops now; the time it was given still runs out
+        if (x.mark !== undefined && x.mark !== null && String(x.mark) !== '') cur.mark = String(x.mark).slice(0, 60);
+        out[job] = { granted: false, handover: true, holder: String(want.holder), holderName: want.name || want.holder, until: new Date(Number(cur.until)).toISOString(), untilMs: Number(cur.until), mark: markOf() };
+        return;
+      }
+      if (cur && prio > (Number(cur.prio) || 0) && !wantOther && (!want || String(want.holder) === me || Number(want.prio) < prio)) cur.want = { holder: me, name: String(name).slice(0, 60), prio: prio, at: now };
+      else if (cur && want && String(want.holder) === me) cur.want.at = now;
+      const busyUntil = live ? Number(cur.until) : now + 60000; // free but kept for the device waiting first
+      out[job] = { granted: false, holder: live ? cur.holder : String((wantOther || {}).holder || ''), holderName: live ? (cur.name || cur.holder) : String((wantOther || {}).name || ''), until: new Date(busyUntil).toISOString(), untilMs: busyUntil, mark: markOf(), next: !!(cur && cur.want && String(cur.want.holder) === me) };
+    });
+    // forget jobs nobody asked for in a week
+    Object.keys(all).forEach(function (j) { if (!(Number(all[j].until) > now - 7 * 86400000)) delete all[j]; });
+    props_().setProperty('LEASES', JSON.stringify(all));
+    const first = out[String(jobs[0].job)];
+    return { ok: true, leases: out, granted: first.granted, holder: first.holder, until: first.until, mark: first.mark, prio: prio, version: SCRIPT_VERSION };
+  }, 5000);
+}
+
+// Viber "once" keys: kept in the Viber once sheet (and the cache, for the quick answer) for 15 days.
+function viberOnceSeen_(key) {
+  const h = sha_(key).slice(0, 24);
+  try { if (CacheService.getScriptCache().get('vonce_' + h)) return true; } catch (e) { /* the sheet */ }
+  const sh = data_().getSheetByName('Viber once');
+  if (!sh || sh.getLastRow() < 2) return false;
+  const keys = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+  for (let i = 0; i < keys.length; i++) if (String(keys[i][0]) === h) return true;
+  return false;
+}
+// A post with this key is on its way (claimed inside the lock; for 2 minutes at most).
+function viberOnceClaimed_(key) { try { return !!CacheService.getScriptCache().get('vclaim_' + sha_(key).slice(0, 24)); } catch (e) { return false; } }
+function viberOnceClaim_(key, on) {
+  try { const c = CacheService.getScriptCache(); const k = 'vclaim_' + sha_(key).slice(0, 24); if (on) c.put(k, '1', 120); else c.remove(k); } catch (e) { /* the sheet still knows once posted */ }
+}
+// The alert was sorted: its key goes (it is posted again if the same alert comes back).
+function viberOnceForget_(key) {
+  const h = sha_(key).slice(0, 24);
+  try { CacheService.getScriptCache().remove('vonce_' + h); } catch (e) { /* the sheet */ }
+  try {
+    const sh = data_().getSheetByName('Viber once');
+    if (!sh || sh.getLastRow() < 2) return;
+    const keys = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+    for (let i = 0; i < keys.length; i++) if (String(keys[i][0]) === h) sh.getRange(i + 2, 1, 1, 1).setValues([['forgotten']]);
+  } catch (e) { /* kept 15 days at most */ }
+}
+function viberOnceKeep_(key) {
+  const h = sha_(key).slice(0, 24);
+  try { CacheService.getScriptCache().put('vonce_' + h, '1', 21600); } catch (e) { /* the sheet */ }
+  try {
+    const sh = sheet_('Viber once', ['key', 'at']);
+    sh.appendRow([h, now_()]);
+    // keep it short: the oldest rows go once it passes 3000 rows
+    if (sh.getLastRow() > 3000) {
+      const keep = sh.getRange(1002, 1, sh.getLastRow() - 1001, 2).getValues();
+      sh.getRange(2, 1, sh.getLastRow() - 1, 2).clearContent();
+      sh.getRange(2, 1, keep.length, 2).setValues(keep);
+    }
+  } catch (e) { /* the cache still knows for 6 hours */ }
 }
