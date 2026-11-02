@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 14;                // 1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 15;                // 1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -134,7 +134,7 @@ function doPost(e) {
     }
     if (body.kind === 'link_keys') return json_({ ok: true, tills: Object.keys(linkKeys_()).map(function (h) { const x = linkKeys_()[h]; return { source: x.source, at: x.at, by: x.by }; }) });
     if (body.kind === 'link_key') return json_(needOwner_(who, body, 'A till PC key') || linkKeyCreate_(body, who));
-    if (['backup_list', 'backup_get', 'myday_events', 'myday_out'].indexOf(body.kind) >= 0) { const no = needOwner_(who, body, body.kind.indexOf('backup') === 0 ? 'Backups' : 'The owner\'s calendar'); if (no) return json_(no); }
+    if (['backup_list', 'backup_get', 'backup_get_part', 'myday_events', 'myday_out'].indexOf(body.kind) >= 0) { const no = needOwner_(who, body, body.kind.indexOf('backup') === 0 ? 'Backups' : 'The owner\'s calendar'); if (no) return json_(no); }
     switch (body.kind) {
       case 'ping':
         return json_({ ok: true, account: Session.getEffectiveUser().getEmail(), folder: root_().getUrl(), device: who.deviceId, version: SCRIPT_VERSION, pinSalt: pinSalt_(body.pinSalt), admin: !!who.admin, user: who.user ? who.user.role : null });
@@ -255,6 +255,11 @@ function doPost(e) {
         saveFile_(folder, body.fileName, Utilities.base64Encode(body.data, Utilities.Charset.UTF_8), 'application/json');
         return json_({ ok: true });
       }
+
+      // 1.0.0 speed: a backup sent in parts of a few MB (the app goes on where it stopped if it is cut off).
+      case 'backup_part': return json_(backupPart_(body, who));
+      case 'backup_done': return json_(backupDone_(body, who));
+      case 'backup_get_part': return json_(backupGetPart_(body, who));
 
       case 'backup_list': {
         // v3.5: the backups kept in Drive › Backups, › Daily, › Monthly and › Manual (newest first) for Admin › Backup & restore.
@@ -1581,6 +1586,88 @@ function pruneBackups_(folder, tooOld) {
     const m = /^backup-(\d{4}-\d{2}-\d{2})/.exec(f.getName());
     if (m && tooOld(m[1])) f.setTrashed(true);
   }
+  // 1.0.0: the parts of a backup made in parts go with it (an index kept elsewhere – the monthly copy – still points
+  // at them, so a folder is kept while any index made from it is younger than the monthly limit: parts are only
+  // binned here for the daily ones when no monthly copy was made from them)
+  const fs = folder.getFolders();
+  while (fs.hasNext()) {
+    const d = fs.next();
+    const m = /^backup-(\d{4}-\d{2}-\d{2}).*\.parts-/.exec(d.getName());
+    if (m && tooOld(m[1]) && !partsInMonthly_(d.getId())) { try { d.setTrashed(true); } catch (e) { /* kept */ } }
+  }
+}
+function partsInMonthly_(folderId) {
+  const it = path_(['Backups']).getFoldersByName('Monthly');
+  if (!it.hasNext()) return false;
+  const files = it.next().getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (f.getSize() > 200000 || /-manifest\.json$/.test(f.getName())) continue; // an index is small
+    try { const x = JSON.parse(f.getBlob().getDataAsString('UTF-8')); if (x && x._upload && x._upload.folder === folderId) return true; } catch (e) { /* not an index */ }
+  }
+  return false;
+}
+// 1.0.0 speed: a backup in parts. The parts of one upload go into "<name>.parts-<upload>" next to where the backup is
+// kept (Backups, › Daily or › Manual); backup_done then keeps the index file <name> ({ _meta, _parts: [file ids] }).
+// While an upload is not finished a part sent again (the app went on after being cut off) replaces the one before;
+// once the index is kept the parts can no longer change (a kept backup is never swapped).
+function backupPartsHome_(body) {
+  const root = path_(['Backups']);
+  const tier = body.tier === 'plain' ? null : (body.tier === 'manual' ? 'Manual' : 'Daily');
+  const folder = tier ? folder_(root, tier) : root;
+  const name = cleanName_(body.fileName || ('backup-' + now_().slice(0, 10) + '.json'), 80);
+  const upload = String(body.upload || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
+  if (!upload) throw new Error('No upload id.');
+  return { root: root, folder: folder, tier: tier, name: name, upload: upload, partsName: name.replace(/\.json$/, '') + '.parts-' + upload };
+}
+function backupPart_(body, who) {
+  const h = backupPartsHome_(body);
+  const parts = folder_(h.folder, h.partsName);
+  if (parts.getFilesByName('done').hasNext()) return { ok: false, error: 'This backup is already kept; its parts cannot change.' };
+  const n = Math.floor(Number(body.n));
+  if (!(n >= 0 && n < 10000)) return { ok: false, error: 'Bad part number.' };
+  const partName = 'part-' + ('0000' + n).slice(-4) + '.json';
+  const old = parts.getFilesByName(partName);
+  while (old.hasNext()) old.next().setTrashed(true);
+  parts.createFile(Utilities.newBlob(Utilities.base64Decode(Utilities.base64Encode(String(body.data || ''), Utilities.Charset.UTF_8)), 'application/json', partName));
+  return { ok: true, n: n };
+}
+function backupDone_(body, who) {
+  const h = backupPartsHome_(body);
+  const it = h.folder.getFoldersByName(h.partsName);
+  if (!it.hasNext()) return { ok: false, error: 'No parts of this backup came in.' };
+  const parts = it.next();
+  const count = Math.floor(Number(body.parts));
+  const ids = [];
+  for (let n = 0; n < count; n++) {
+    const f = parts.getFilesByName('part-' + ('0000' + n).slice(-4) + '.json');
+    if (!f.hasNext()) return { ok: false, error: 'Part ' + (n + 1) + ' of the backup is missing – it is sent again on the next try.' };
+    ids.push(f.next().getId());
+  }
+  if (!parts.getFilesByName('done').hasNext()) parts.createFile(Utilities.newBlob(Utilities.base64Decode(Utilities.base64Encode(now_())), 'text/plain', 'done'));
+  const index = {};
+  if (body.head && typeof body.head === 'object') Object.keys(body.head).forEach(function (k) { index[k] = body.head[k]; });
+  index._meta = body.meta || { app: 'Easy Buys', made: now_() };
+  index._parts = ids;
+  index._upload = { id: h.upload, folder: parts.getId() };
+  if (!h.tier) {
+    const f0 = saveFile_(h.folder, h.name, Utilities.base64Encode(JSON.stringify(index), Utilities.Charset.UTF_8), 'application/json');
+    log_('Backups', [who.deviceId, 'Older', h.name, 'in ' + count + ' parts']);
+    return { ok: true, id: f0.getId(), parts: count };
+  }
+  // the same keeping as a backup in one file (daily 30 days, the first of each month 12 months, manual for ever)
+  const r = backupTiered_({ tier: body.tier, date: body.date, fileName: h.name, data: JSON.stringify(index), manifest: body.manifest }, who);
+  return { ok: r.ok, id: r.id, manifestId: r.manifestId, monthly: r.monthly, parts: count };
+}
+function backupGetPart_(body, who) {
+  const file = DriveApp.getFileById(String(body.id || ''));
+  if (!insideFolder_(file, path_(['Backups']).getId(), 2)) return { ok: false, error: 'Not an Easy Buys backup.' };
+  const index = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
+  const n = Math.floor(Number(body.n));
+  if (!index || !index._parts || !(n >= 0 && n < index._parts.length)) return { ok: false, error: 'No such part.' };
+  const part = DriveApp.getFileById(index._parts[n]);
+  if (!insideFolder_(part, path_(['Backups']).getId(), 3)) return { ok: false, error: 'Not an Easy Buys backup.' };
+  return { ok: true, n: n, text: part.getBlob().getDataAsString('UTF-8') };
 }
 function backupFiles_() {
   const root = path_(['Backups']);

@@ -46,8 +46,16 @@ jobs:
 
       - name: Install app libraries
         run: |
-          npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
-          npx expo install --fix || true
+          # Repeatable builds: with a lockfile (package-lock.json) the exact same library versions are installed every time.
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund || npm ci --no-audit --no-fund --legacy-peer-deps
+          else
+            echo "No package-lock.json – installing the newest allowed versions (not repeatable)"
+            npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+            npx expo install --fix || true
+            # keep the lockfile this build made, so it can be added to the app (then every later build uses it)
+            mkdir -p lockfile-out && cp package-lock.json lockfile-out/ || true
+          fi
           # The face engine and its model files come from this package – make sure it is really there.
           if [ ! -s node_modules/@vladmandic/face-api/model/face_recognition_model.bin ]; then
             echo "Face engine package missing – installing it again"
@@ -55,6 +63,13 @@ jobs:
           fi
           ls -la node_modules/@vladmandic/face-api/model/ | head -20 || true
 
+
+      - name: Keep the lockfile made by this build (only when the app has none yet)
+        if: hashFiles('lockfile-out/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock
+          path: lockfile-out/package-lock.json
       - name: Run the checks (upgrade from Bakery, Time Clock, timesheets, leave, sync, device linking, cloud)
         run: |
           if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
@@ -94,6 +109,25 @@ jobs:
           EB_KEY_ALIAS: ${{ secrets.EB_KEY_ALIAS }}
         run: |
           CI=1 npx expo prebuild --platform android --clean --no-install
+          # "Why did the app close" (modules/exit-info, a small Kotlin module found by Expo autolinking): check it builds.
+          # If it does not, the app is built without it (the problem report then just says Android's reason is not known).
+          if [ -d modules/exit-info ]; then
+            (cd android && chmod +x gradlew && ./gradlew projects --no-daemon -q > /tmp/projects.txt 2>&1) || true
+            EXP=$(grep -o "':[^']*exit-info'" /tmp/projects.txt | head -1 | tr -d "'")
+            if [ -z "$EXP" ]; then
+              echo "::warning::The 'why it closed' module (modules/exit-info) was not linked into the app."
+              echo "EXITINFO=not linked" >> "$GITHUB_ENV"
+            elif (cd android && ./gradlew "$EXP:compileReleaseKotlin" --no-daemon -PreactNativeArchitectures=arm64-v8a > /tmp/exitinfo.log 2>&1); then
+              echo "Why-it-closed module OK ($EXP)."
+              echo "EXITINFO=ok" >> "$GITHUB_ENV"
+            else
+              tail -40 /tmp/exitinfo.log
+              echo "::warning::The 'why it closed' module did not build – this app is built without it."
+              echo "EXITINFO=left out" >> "$GITHUB_ENV"
+              rm -rf modules/exit-info
+              CI=1 npx expo prebuild --platform android --clean --no-install
+            fi
+          fi
           # Make sure the face engine is inside the app (copy it again if the build step missed it).
           if [ ! -s android/app/src/main/assets/face/model/face_recognition_model.bin ]; then
             echo "Face engine not packed by prebuild – copying it now"
@@ -126,6 +160,12 @@ jobs:
           APKS=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
           if [ -x "$APKS" ]; then "$APKS" verify --print-certs app/build/outputs/apk/release/app-arm64-v8a-release.apk | grep -i "SHA-256" | head -1 | tee /tmp/cert.txt; fi
           if [ "$SIGNED" = "shop" ] && ! grep -qi "e2f8066179d9a6457a5746f8966338f47ab9d3f0c7fd3861e70119d323b39341" /tmp/cert.txt; then echo "::error::The app is not signed with the shop's key"; exit 1; fi
+          # Keep the JS source map (it turns "index.android.bundle:1:2351626" in a problem report back into file:line).
+          # It is published next to the apk, never inside it.
+          MAP=$(ls app/build/generated/sourcemaps/react/release/*.map 2>/dev/null | head -1)
+          [ -n "$MAP" ] || MAP=$(find app/build -name "index.android.bundle*.map" ! -name "*packager*" 2>/dev/null | head -1)
+          if [ -n "$MAP" ]; then cp "$MAP" ../sourcemap.map; ls -la ../sourcemap.map; else echo "::warning::No JS source map was made by this build."; fi
+          if unzip -l app/build/outputs/apk/release/app-arm64-v8a-release.apk | grep -qE '\.map$'; then echo "::error::A source map got inside the apk"; exit 1; fi
 
       - name: Publish the apk
         env:
@@ -138,9 +178,13 @@ jobs:
           ls -la android/app/build/outputs/apk/release/
           cp android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "../$NAME"
           cp android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "../$NAME32"
+          MAPNAME="EasyBuys-v${VERSION}-build${CODE}.js.map"
+          MAPS=""
+          if [ -s sourcemap.map ]; then cp sourcemap.map "../$MAPNAME"; MAPS="../$MAPNAME"; fi
+          echo "CODE=${CODE}" >> "$GITHUB_ENV"
           cd ..
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$NAME" "$NAME32" --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}. Signed with: ${SIGNED:-test} key."
+          gh release create latest "$NAME" "$NAME32" ${MAPS:+"$MAPNAME"} --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}. Signed with: ${SIGNED:-test} key. Why-it-closed reader: ${EXITINFO:-unknown}. (The .js.map file is for reading problem reports – do not install it.)"
 
       - name: Keep a copy for 30 days
         uses: actions/upload-artifact@v4
@@ -148,3 +192,11 @@ jobs:
           name: easy-buys-apk
           path: EasyBuys-*.apk
           retention-days: 30
+
+      - name: Keep the source map of this build (for reading problem reports)
+        if: ${{ hashFiles('EasyBuys-*.js.map') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: easy-buys-sourcemap-build${{ env.CODE }}
+          path: EasyBuys-*.js.map
+          retention-days: 90
