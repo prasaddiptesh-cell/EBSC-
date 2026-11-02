@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 12;                // 1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 13;                // 1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -1888,7 +1888,7 @@ const USER_LOCKED_COLS = ['role', 'pin_hash', 'perms', 'permissions', 'works_shi
 const LOCKED_SHARED = ['role_perms', 'locked_admin_ok', 'modules_on', 'update_repo', 'go_live', 'gl_lock', 'gl_map', 'acct_settings', 'ap_rules',
   'pay_rules', 'pay_cycle', 'pay_signoff_rules', 'tax_calendar_rules', 'employer_details', 'till_rules', 'cig_tally', 'owed_rules',
   'viber_channels', 'doc_settings', 'main_tablet_device', 'fresh_start', 'clean_start', 'link_settings', 'ai_settings', 'backup_settings',
-  'email_prefs', 'doc_visibility', 'watchdog', 'email_logins'];
+  'email_prefs', 'doc_visibility', 'watchdog', 'email_logins', 'recharge_setup'];
 // Settings where only some fields are locked (src/services/locked.js LOCKED_FIELDS).
 const LOCKED_FIELDS = { go_live: ['liveFrom', 'freshFrom'] };
 const LOCKED_TABLES = { users: 'cols', shops: '*', tills: '*', gl_accounts: '*', bin_records: '*', bin_parts: '*', pay_profiles: '*',
@@ -1908,7 +1908,7 @@ const KNOWN_TABLES = ['aronium_refunds', 'shift_ends', 'handover_notes', 'verify
   'roster_changes', 'myday_items', 'myday_marks', 'issued_docs', 've_items', 've_due', 've_work', 've_faults', 've_fuel', 've_checks',
   'accountant_queries', 'tax_returns', 'tax_return_versions', 'till_surplus', 'cheque_cover', 'handovers', 'fccc_lists', 'inv_count_entries',
   'inv_item_suppliers', 'aronium_feed', 'duty_lists', 'duty_runs', 'roster_marks', 'verify_queries', 'shop_accounts', 'bin_records', 'bin_parts',
-  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log',
+  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales',
   // tables the main software or older apps may still send
   'suppliers', 'materials', 'products', 'recipes', 'equipment', 'checklists', 'checklist_items', 'shift_names', 'steps', 'product_steps', 'product_decks',
   'safe_counts', 'shop_profiles', 'notifications', 'messages', 'stock_takes', 'handover_notes'];
