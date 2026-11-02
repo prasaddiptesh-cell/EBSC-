@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 15;                // 1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 16;                // 1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -120,6 +120,7 @@ function doPost(e) {
     if (body.kind === 'cloud_settings') return json_((body.requireApproval === undefined && body.strictSign === undefined && body.linkCutover === undefined ? null : needOwner_(who, body, 'Changing the cloud settings')) || cloudSettings_(body));
     if (body.kind === 'fresh_start') return json_(freshStart_(body));
     if (body.kind === 'clean_start') return json_(needOwner_(who, body, 'Start clean') || cleanStart_(body, who));
+    if (body.kind === 'tidy_records') return json_(needOwner_(who, body, 'Tidy Drive photos') || tidyRecords_(body.maxMs));
     if (body.kind === 'setup_pack') return json_(needOwner_(who, body, 'The supplier set-up pack') || setupPack_());
     if (body.kind === 'email_password_set') return json_(emailPasswordSet_(body, who));
     if (body.kind === 'security_email') {
@@ -160,9 +161,12 @@ function doPost(e) {
       }
 
       case 'report': {
-        const folder = path_(['Shift reports', body.month || 'Other']);
-        const pdf = saveFile_(folder, body.fileName + '.pdf', body.pdf, MimeType.PDF);
-        const xlsx = body.xlsx ? saveFile_(folder, body.fileName + '.xlsx', body.xlsx, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') : null;
+        // script 16: Records › month › Shift reports › "2026-10-14 Shift report - Bakery - SH-0042" (older apps: the old place)
+        const niceR = recordsFolder_(body, ['Shift reports']);
+        const folder = niceR ? niceR.folder : path_(['Shift reports', body.month || 'Other']);
+        const stemR = niceR ? niceR.name : body.fileName;
+        const pdf = saveFile_(folder, stemR + '.pdf', body.pdf, MimeType.PDF);
+        const xlsx = body.xlsx ? saveFile_(folder, stemR + '.xlsx', body.xlsx, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') : null;
         // 1.0.0 build 1: only to addresses the owner saved (Admin › Emails), and the device's text is shown as text, not HTML.
         const to = onlyAllowed_(cleanEmails_(body.emails), false);
         if (to.length) {
@@ -178,8 +182,10 @@ function doPost(e) {
       }
 
       case 'po': {
-        const folder = path_(['Purchase orders', body.month || 'Other']);
-        const pdf = saveFile_(folder, body.fileName + '.pdf', body.pdf, MimeType.PDF);
+        // script 16: Records › month › Purchase orders › "PO 0123 - Bijay - Week 2 (2026-11-09).pdf" (older apps: the old place)
+        const niceP = recordsFolder_(body, ['Purchase orders']);
+        const folder = niceP ? niceP.folder : path_(['Purchase orders', body.month || 'Other']);
+        const pdf = saveFile_(folder, (niceP ? niceP.name : body.fileName) + '.pdf', body.pdf, MimeType.PDF);
         const to = onlyAllowed_(cleanEmails_(body.emails), true);
         if (to.length) {
           mail_({
@@ -194,8 +200,11 @@ function doPost(e) {
       }
 
       case 'photo': {
-        const folder = path_(['Photos', body.month || 'Other', body.refType || 'other']);
-        const f = saveFile_(folder, body.fileName, body.data, body.mime === 'application/pdf' ? MimeType.PDF : MimeType.JPEG);
+        // 1.0.0 script 16: invoices, cheques / payments, deposits and Z reports go in Records › month › shop › kind with a
+        // readable name (the app works it out: services/photoNames.js). Older apps (no niceName) keep the old place.
+        const nice = recordsFolder_(body, ['Invoices', 'Cheques', 'Deposits', 'Z reports']);
+        const folder = nice ? nice.folder : path_(['Photos', body.month || 'Other', body.refType || 'other']);
+        const f = saveFile_(folder, nice ? nice.name : body.fileName, body.data, body.mime === 'application/pdf' ? MimeType.PDF : MimeType.JPEG);
         return json_({ ok: true, url: f.getUrl() });
       }
 
@@ -306,6 +315,15 @@ function doPost(e) {
         mail_({ to: to.join(','), subject: String(body.subject || 'Easy Buys'), body: String(body.text || ''), attachments: atts, name: 'Easy Buys' });
         log_('Emails', [to.join(', '), body.subject, atts.length + ' attachment(s)']);
         return json_({ ok: true });
+      }
+
+      case 'payslip_save': {
+        // 1.0.0 script 16: a copy of a released payslip (PDF) in Records › month › Payslips. Nothing is replaced (" (2)").
+        if (body.typeFolder !== 'Payslips') return json_({ ok: false, error: 'Only payslips are kept here.' });
+        const nice = recordsFolder_({ niceName: body.fileName, monthFolder: body.monthFolder, shopFolder: '', typeFolder: 'Payslips' }, ['Payslips']);
+        if (!nice || !/\.pdf$/i.test(nice.name)) return json_({ ok: false, error: 'No month or name for the payslip.' });
+        const f = saveFile_(nice.folder, nice.name, body.data, MimeType.PDF);
+        return json_({ ok: true, url: f.getUrl() });
       }
 
       case 'payslip_email': {
@@ -1538,7 +1556,9 @@ function fileGet_(body, who) {
   let file;
   try { file = DriveApp.getFileById(id); file.getName(); } catch (e) { return { ok: false, error: 'This file is no longer in Google Drive.' }; }
   // 1.0.0 (stream C) photos (invoices, cheques, deposit slips…) live in Photos › month › type: Today fetches them when the phone's copy was cleared
-  if (!row && !insideFolder_(file, path_(['Documents']).getId(), 5) && !insideFolder_(file, path_(['Photos']).getId(), 4)) return { ok: false, error: 'Not an Easy Buys document.' };
+  // script 16: and in Records › month › [shop ›] kind – but never a payslip copy (only the owner opens those, in Drive).
+  const inRecords = insideFolder_(file, path_(['Records']).getId(), 4) && !inPayslips_(file);
+  if (!row && !insideFolder_(file, path_(['Documents']).getId(), 5) && !insideFolder_(file, path_(['Photos']).getId(), 4) && !inRecords) return { ok: false, error: 'Not an Easy Buys document.' };
   const legacy = row ? null : legacyDocType_(id);
   const type = row ? String(row[6] || '') : legacy ? legacy.type : '';
   const access = row ? String(row[7] || 'normal') : legacy ? legacy.access : 'normal';
@@ -2694,4 +2714,192 @@ function oldFilesAway_(at) {
   const dest = folder_(root, name);
   names.forEach(function (f) { f.moveTo(dest); });
   return { moved: names.length, name: name };
+}
+
+// ---------------------------------------------------------------- 1.0.0 script 16: readable record photos in Drive
+// Easy Buys › Records › "2026-10 October" › "Shop 1 - Drasa Avenue" (or "Business") › Invoices | Cheques, and in the
+// month folder itself: Deposits, Z reports, Payslips. The same names as the app's src/services/photoNames.js (tested
+// against each other in tests/photoNames.test.js).
+const RECORD_FOLDERS = { invoice: 'Invoices', payment: 'Cheques', stub: 'Cheques', deposit: 'Deposits', till: 'Z reports' };
+const RECORD_MONTH_LEVEL = { deposit: 1, till: 1, Deposits: 1, 'Z reports': 1, Payslips: 1, 'Purchase orders': 1, 'Shift reports': 1 };
+const RECORD_TYPE_FOLDERS = ['Invoices', 'Cheques', 'Deposits', 'Z reports', 'Payslips', 'Purchase orders', 'Shift reports'];
+const NAME_LIMIT = 115;
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function cleanPart_(s) {
+  return String(s === null || s === undefined ? '' : s).replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+}
+function monthFolderOf_(date) {
+  const m = /^(\d{4})-(\d{2})-\d{2}/.exec(String(date || ''));
+  if (!m || +m[2] < 1 || +m[2] > 12) return null;
+  return m[1] + '-' + m[2] + ' ' + MONTH_NAMES[+m[2] - 1];
+}
+function shopFolderOf_(shop) {
+  if (!shop) return 'Business';
+  const name = cleanPart_(shop.name);
+  const n = /^S(\d+)$/i.exec(String(shop.code || ''));
+  if (/^shop\s*\d+/i.test(name)) return name;
+  if (n) return name ? 'Shop ' + n[1] + ' - ' + name : 'Shop ' + n[1];
+  return name || cleanPart_(shop.code) || 'Business';
+}
+function shopShortOf_(shop) {
+  if (!shop) return '';
+  const n = /^S(\d+)$/i.exec(String(shop.code || ''));
+  if (n) return 'Shop ' + n[1];
+  const m = /^shop\s*(\d+)/i.exec(cleanPart_(shop.name));
+  return m ? 'Shop ' + m[1] : (cleanPart_(shop.name) || cleanPart_(shop.code));
+}
+function money_(v) {
+  const n = Number(v);
+  if (!isFinite(n) || n <= 0) return '';
+  const p = n.toFixed(2).split('.');
+  return '$' + p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + p[1];
+}
+function chequeNo_(v) { const s = cleanPart_(v); return /^\d{1,5}$/.test(s) ? ('000000' + s).slice(-6) : s; }
+function invoiceNo_(v) { const s = cleanPart_(v); return !s ? '' : (/^inv/i.test(s) ? s : 'INV ' + s); }
+// { refType, record, shop, chequeNo, page, ext } → { fileName, monthFolder, shopFolder, typeFolder } or null (old place).
+function photoPlace_(o) {
+  const refType = o.refType; const record = o.record; const shop = o.shop || null; const page = Number(o.page) || 1;
+  const typeFolder = RECORD_FOLDERS[refType];
+  if (!typeFolder || !record) return null;
+  let date; let head = null; let party = ''; let tail = '';
+  if (refType === 'invoice') {
+    date = record.invoice_date || record.received_date; party = record.supplier_name;
+    tail = record.kind === 'credit' ? 'Credit note' + (record.invoice_no ? ' ' + cleanPart_(record.invoice_no) : '') : (invoiceNo_(record.invoice_no) || 'Invoice');
+  } else if (refType === 'payment') {
+    date = record.pay_date; const c = chequeNo_(o.chequeNo || record.cheque_no);
+    head = c ? 'Cheque ' + c : 'Payment'; party = record.supplier_name; tail = money_(record.amount);
+  } else if (refType === 'deposit') {
+    date = record.deposit_date || String(record.created_at || '').slice(0, 10); head = 'Deposit'; party = shopShortOf_(shop);
+    tail = money_(record.total || (Number(record.cash_amount || 0) + Number(record.cheque_amount || 0)));
+  } else if (refType === 'till') {
+    date = record.shift_date || String(record.counted_at || '').slice(0, 10);
+    const z = cleanPart_(record.z_number); head = z ? 'Z ' + z : 'Z report';
+    const till = cleanPart_(record.till_name); const where = shopShortOf_(shop);
+    party = /shop/i.test(till) || !where ? till : (where + ' ' + till).trim();
+  } else {
+    date = record.cheque_date; const c2 = chequeNo_(o.chequeNo || record.cheque_no);
+    head = c2 ? 'Cheque ' + c2 : 'Cheque'; party = record.payee; tail = money_(record.amount);
+  }
+  const monthFolder = monthFolderOf_(date);
+  if (!monthFolder) return null;
+  const day = String(date).slice(0, 10);
+  const suffix = page > 1 ? ' (page ' + page + ')' : '';
+  let who = cleanPart_(party);
+  const build = function () {
+    const bits = [head ? day + ' ' + head : day];
+    if (who) bits.push(who);
+    if (tail) bits.push(cleanPart_(tail));
+    const s = head ? bits.join(' - ') : (day + ' ' + bits.slice(1).join(' - ')).trim();
+    return s + suffix;
+  };
+  let stem = build();
+  if (stem.length > NAME_LIMIT && who) { who = who.slice(0, Math.max(1, who.length - (stem.length - NAME_LIMIT))).trim(); stem = build(); }
+  if (stem.length > NAME_LIMIT) stem = stem.slice(0, NAME_LIMIT).trim();
+  const e = /^(pdf|jpg|jpeg|png)$/i.test(String(o.ext || '')) ? String(o.ext).toLowerCase() : 'jpg';
+  return { fileName: stem + '.' + e, monthFolder: monthFolder, shopFolder: RECORD_MONTH_LEVEL[refType] ? '' : shopFolderOf_(shop), typeFolder: typeFolder };
+}
+// The folder and the cleaned name for a request that says where (app 1.0.0 with script 16), or null (the old place).
+function recordsFolder_(b, allowed) {
+  const type = String(b.typeFolder || '');
+  if (allowed && allowed.indexOf(type) < 0) return null;
+  const month = cleanPart_(b.monthFolder);
+  const name = cleanPart_(b.niceName).slice(0, 120).replace(/ +(\.[A-Za-z0-9]+)$/, '$1');
+  if (RECORD_TYPE_FOLDERS.indexOf(type) < 0 || !/^\d{4}-\d{2} [A-Za-z]+$/.test(month) || !name) return null;
+  const shop = RECORD_MONTH_LEVEL[type] ? '' : (cleanPart_(b.shopFolder).slice(0, 60) || 'Business');
+  return { folder: path_(['Records', month, shop, type].filter(String)), name: name };
+}
+function inPayslips_(file) {
+  const ps = file.getParents();
+  while (ps.hasNext()) if (ps.next().getName() === 'Payslips') return true;
+  return false;
+}
+// A name not used yet in the folder: "x.jpg", "x (2).jpg", …
+function freeName_(folder, name) {
+  if (!folder.getFilesByName(name).hasNext()) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name; const ext = dot > 0 ? name.slice(dot) : '';
+  let out = name;
+  for (let i = 2; i < 500 && folder.getFilesByName(out).hasNext(); i++) out = stem + ' (' + i + ')' + ext;
+  return out;
+}
+const TIDY_MS = 270000; // ~4½ minutes: Apps Script stops a run at 6
+// Owner / admin (Admin › Backup) or the script editor: the photos already in Drive › Easy Buys › Photos › month › kind
+// named "<kind>-<record id>-<n>.jpg" are renamed and moved into Records (moving keeps the file id, so the links saved on
+// the records still open them). Unknown ones stay where they are; nothing is deleted. Time-boxed: { moved, left, more }.
+function tidyRecords_(maxMs) {
+  const started = Date.now();
+  const budget = Math.max(0, Math.min(TIDY_MS, maxMs === undefined || maxMs === null || maxMs === '' ? TIDY_MS : Number(maxMs) || 0));
+  const top = root_().getFoldersByName('Photos');
+  if (!top.hasNext()) return { ok: true, moved: 0, left: 0, more: false };
+  const photos = top.next();
+  const cache = {};
+  const table = function (t) {
+    if (cache[t]) return cache[t];
+    const out = {}; const sh = data_().getSheetByName('T_' + t);
+    if (sh) values_(sh).forEach(function (r) { try { const o = JSON.parse(r[4] || 'null'); if (o) out[String(r[0])] = o; } catch (e) { /* skip */ } });
+    cache[t] = out; return out;
+  };
+  const byPayment = function (payUid) {
+    if (!cache._alloc) { cache._alloc = {}; const a = table('ap_allocations'); Object.keys(a).forEach(function (k) { (cache._alloc[a[k].payment_uid] = cache._alloc[a[k].payment_uid] || []).push(a[k]); }); }
+    const inv = table('ap_invoices');
+    const list = (cache._alloc[payUid] || []).slice().sort(function (x, y) { return String(x.uid) < String(y.uid) ? -1 : 1; });
+    for (let i = 0; i < list.length; i++) { const v = inv[list[i].invoice_uid]; if (v && v.shop_code) return v.shop_code; }
+    return null;
+  };
+  const shopOf = function (code) { return code ? (table('shops')[code] || { code: code, name: '' }) : null; };
+  const lookup = function (refType, refId) {
+    let record = null; let shop = null; let cq = null;
+    if (refType === 'invoice') { record = table('ap_invoices')[refId] || null; if (record) shop = shopOf(record.shop_code); }
+    else if (refType === 'payment') {
+      record = table('ap_payments')[refId] || null;
+      if (record) { if (!record.cheque_no && record.cheque_uid) { const c = table('cheques')[record.cheque_uid]; cq = c ? c.cheque_no : null; } shop = shopOf(record.shop_code || byPayment(record.uid)); }
+    } else if (refType === 'deposit' || refType === 'till') { record = table(refType === 'deposit' ? 'deposits' : 'till_counts')[refId] || null; if (record) shop = shopOf(record.shop_code); }
+    else if (refType === 'stub') {
+      record = table('cheques')[refId] || null;
+      if (record) { const pay = record.payment_uid ? table('ap_payments')[record.payment_uid] : null; shop = shopOf(record.shop_code || (pay && pay.shop_code) || byPayment(record.payment_uid)); }
+    }
+    return record ? { record: record, shop: shop, chequeNo: cq } : null;
+  };
+  // Every old-named photo of the kinds that move, grouped by record (pages in photo order).
+  const groups = {}; const order = [];
+  let left = 0;
+  const months = photos.getFolders();
+  while (months.hasNext()) {
+    const m = months.next();
+    Object.keys(RECORD_FOLDERS).forEach(function (kind) {
+      const it = m.getFoldersByName(kind);
+      while (it.hasNext()) {
+        const files = it.next().getFiles();
+        while (files.hasNext()) {
+          const f = files.next();
+          const p = /^([a-z_]+)-(.+)-(\d+)\.(jpe?g|pdf|png)$/i.exec(String(f.getName()));
+          if (!p || p[1] !== kind) { left++; continue; }
+          const key = kind + '|' + p[2];
+          if (!groups[key]) { groups[key] = { kind: kind, refId: p[2], files: [] }; order.push(key); }
+          groups[key].files.push({ f: f, n: Number(p[3]), ext: p[4] });
+        }
+      }
+    });
+  }
+  let moved = 0; let more = false;
+  for (let gi = 0; gi < order.length; gi++) {
+    if (moved > 0 && Date.now() - started >= budget) { more = true; break; } // at least one record moved each run
+    const g = groups[order[gi]];
+    const found = lookup(g.kind, g.refId);
+    g.files.sort(function (a, b) { return a.n - b.n; });
+    g.files.forEach(function (x, i) {
+      const place = found ? photoPlace_({ refType: g.kind, record: found.record, shop: found.shop, chequeNo: found.chequeNo, page: i + 1, ext: x.ext }) : null;
+      const where = place ? recordsFolder_({ niceName: place.fileName, monthFolder: place.monthFolder, shopFolder: place.shopFolder, typeFolder: place.typeFolder }) : null;
+      if (!where) { left++; return; }
+      try { x.f.moveTo(where.folder); x.f.setName(freeName_(where.folder, where.name)); moved++; } catch (e) { left++; }
+    });
+  }
+  log_('Tidy photos', [moved + ' moved', left + ' left', more ? 'more to do' : 'done']);
+  return { ok: true, moved: moved, left: left, more: more };
+}
+// Run from the script editor (Run › tidyRecords) – again until the log says "done".
+function tidyRecords() {
+  const r = tidyRecords_();
+  Logger.log('Moved ' + r.moved + ', left where they are ' + r.left + (r.more ? ' – run again for the rest.' : ' – done.'));
+  return r;
 }
