@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 18;                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
+const SCRIPT_VERSION = 19;                // 1.0.0 build 12 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
+// script 18:                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
 const MAIN_TABLES_PULL_ALL = true;   // the main software receives every table, including the change history
@@ -128,11 +129,12 @@ function doPost(e) {
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
     if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who, Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
       // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
-      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.user = who.user ? who.user.role : null; return json_(out); }
+      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.user = who.user ? who.user.role : null; return json_(out); }
     if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
     if (body.kind === 'invite_cancel') return json_(needOwner_(who, body, 'Cancelling an invite') || inviteCancel_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
-    if (body.kind === 'device_status') return json_(needOwner_(who, body, 'Blocking or allowing a device') || deviceStatus_(body.id, body.status, who));
+    if (body.kind === 'device_status') return json_(needOwner_(who, body, 'Blocking or allowing a device') || deviceStatus_(body.id, body.status, who, body));
+    if (body.kind === 'users_all') return json_(usersAll_(who));
     if (body.kind === 'device_control') return json_(needOwner_(who, body, 'Changing a device') || deviceControl_(body, who));
     if (body.kind === 'problem_log') return json_(problemLogSave_(body, who));
     if (body.kind === 'problem_log_get') return json_(problemLogGet_(body.id));
@@ -1134,6 +1136,28 @@ function pull_(since, deviceId, forMain, who, limit) {
   return { ok: true, records: out, next: next, more: start + used <= last, left: Math.max(0, last - (start + used) + 1), page: used };
 }
 
+// 1.0.0 build 12: which logins' PINs this device may hold (admin device, its shop). When it changes the device asks
+// for every login again (users_all) – the PINs it may now have come at once, not only with each person's next change.
+function access_(who) {
+  if (!who || who.forMain) return 'main';
+  return (who.admin ? 'A' : 'S') + '|' + String((ctlAll_()[who.deviceId] || {}).shop || '');
+}
+function usersAll_(who) {
+  const sh = data_().getSheetByName('T_users');
+  const out = [];
+  if (sh) values_(sh).forEach(function (row) {
+    if (!row || !row[0]) return;
+    let parsed = {};
+    try { parsed = JSON.parse(row[4]); } catch (e) { return; }
+    const vby = parsed && parsed._vby ? parsed._vby : null;
+    if (parsed) delete parsed._vby;
+    const rec = { t: 'users', k: String(row[0]), u: String(row[1]), d: String(row[2]), row: forDevice_('users', parsed, String(row[0]), who) };
+    if (vby) rec.vby = vby;
+    out.push(rec);
+  });
+  return { ok: true, records: out, access: access_(who), version: SCRIPT_VERSION };
+}
+
 // ================================================================ devices & invites
 // 1.0.0 build 10: the Devices sheet is read on every request (who is asking): its rows are kept in the script cache,
 // stamped with a version number in Script properties (DEVROWS_V) that every write to the sheet moves on – a copy made
@@ -1404,11 +1428,19 @@ function join_(body) {
   } finally { lock.releaseLock(); REQ_.locked -= 1; }
 }
 
-function deviceStatus_(id, status, who) {
+function deviceStatus_(id, status, who, body) {
   if (['active', 'blocked'].indexOf(status) < 0) return { ok: false, error: 'Choose active or blocked.' };
   if (String(id) === String(who.deviceId) && status === 'blocked') return { ok: false, error: 'A device cannot block itself.' };
   const d = findDevice_(function (r) { return String(r[0]) === String(id); });
   if (!d) return { ok: false, error: 'Device not found.' };
+  // 1.0.0 build 12 (owner, 6 Nov: "as soon as it is approved it should be good to go"): allowed as the owner's / an
+  // admin's phone in the same tap – its first sync then brings the owner / admin PINs too.
+  if (status === 'active' && body && body.admin === true) {
+    const all = ctlAll_(); const c = ctl_(all, String(id));
+    c.admin = true; hist_(c, 'Allowed as an owner / admin phone', who && who.user ? who.user.name : '');
+    ctlSaveSafe_(all);
+    secEvent_('device', { device: String(d.v[1] || id), person: who && who.user ? who.user.name : '', what: 'Allowed as an owner / admin phone', refused: false });
+  }
   d.sh.getRange(d.row, 4).setValue(status);
   devicesChanged_();
   return { ok: true, devices: devices_() };
