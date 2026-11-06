@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 19;                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
+const SCRIPT_VERSION = 20;                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
+// script 19:                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
 // script 18:                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
 const PULL_LIMIT = 800;
@@ -135,6 +136,8 @@ function doPost(e) {
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
     if (body.kind === 'device_status') return json_(needOwner_(who, body, 'Blocking or allowing a device') || deviceStatus_(body.id, body.status, who, body));
     if (body.kind === 'users_all') return json_(usersAll_(who));
+    // 1.0.0 build 14: the invoices from before the app (owner / admin only; see histRoute_ at the end)
+    if (/^hist_[a-z]+$/.test(String(body.kind || ''))) return json_(histRoute_(body, who));
     if (body.kind === 'device_control') return json_(needOwner_(who, body, 'Changing a device') || deviceControl_(body, who));
     if (body.kind === 'problem_log') return json_(problemLogSave_(body, who));
     if (body.kind === 'problem_log_get') return json_(problemLogGet_(body.id));
@@ -3341,4 +3344,427 @@ function viberOnceKeep_(key) {
       sh.getRange(2, 1, keep.length, 2).setValues(keep);
     }
   } catch (e) { /* the cache still knows for 6 hours */ }
+}
+
+// ================================================================ 1.0.0 build 14 (script 20): the invoices from before the app
+// Owner, 7 Nov: "the whole 2 years of invoices we have can be added without any notification … we will enter the sales
+// for those days and the app does the VAT". The scanned invoices are in Drive (EBSC Invoices Records › shop › month
+// folder › "7.10.26 motibhai.pdf"). This reads them in the background (a trigger every 10 minutes, about 4 minutes a
+// run, until all are read): each PDF / photo by Gemini (GEMINI_KEY, as for invoice photos) for the totals only. They
+// are history: kept in their own sheets (H_*), never in the app's payables – no reminders, no To verify, no Viber, no
+// supplier balances. An invoice that could not be read, or whose figures do not add up, is an open item of its month
+// for the owner to look at. The owner enters the sales of each day or month (standard-rated and zero-rated, incl. VAT),
+// works through each month and closes it; a closed month changes only after the owner / an admin opens it again.
+const HIST_ROOT_NAME = 'EBSC Invoices Records';
+const HIST_INV_HEADER = ['key', 'file_id', 'shop', 'folder', 'file', 'url', 'supplier', 'tin', 'invoice_no', 'date', 'subtotal', 'vat', 'total', 'zero', 'status', 'why', 'by', 'at', 'model'];
+const HIST_Q_HEADER = ['file_id', 'shop', 'folder', 'file', 'url', 'mime', 'size', 'state', 'tries', 'at', 'why'];
+const HIST_SALES_HEADER = ['key', 'ym', 'shop', 'json', 'at', 'by'];
+const HIST_RUN_MS = 270000;              // a trigger may run 6 minutes; stop starting new work after 4½
+const HIST_FILE_MS = 75000;              // one reading takes up to about a minute
+const HIST_MAX_BYTES = 14 * 1024 * 1024; // base64 grows a third; Gemini takes about 20 MB
+// Fiji VAT: 15% until 31 July 2025, 12.5% from 1 August 2025 (FRCS).
+function histVatRate_(date) { return String(date || '') < '2025-08-01' ? 15 : 12.5; }
+function histR2_(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+function histNum_(v) { if (v === '' || v === null || v === undefined) return null; const n = Number(String(v).replace(/[^0-9.\-]/g, '')); return isFinite(n) ? n : null; }
+function histJob_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('HIST_JOB') || 'null'); } catch (e) { return null; } }
+function histSetJob_(j) { PropertiesService.getScriptProperties().setProperty('HIST_JOB', JSON.stringify(j)); }
+function histRunInfo_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('HIST_RUN') || '{}') || {}; } catch (e) { return {}; } }
+function histSetRun_(r) { PropertiesService.getScriptProperties().setProperty('HIST_RUN', JSON.stringify(r)); }
+function histClosed_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('HIST_CLOSED') || '{}') || {}; } catch (e) { return {}; } }
+// A month folder's name → "2026-10": "10 2026", "10.2026", "2026-10", "October 2026", "Oct 2026".
+const HIST_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function histFolderYm_(name) {
+  const s = String(name || '').trim().toLowerCase();
+  let m = /^(\d{1,2})[\s.\-_/]+(\d{4})$/.exec(s);
+  if (m && +m[1] >= 1 && +m[1] <= 12) return m[2] + '-' + ('0' + m[1]).slice(-2);
+  m = /^(\d{4})[\s.\-_/]+(\d{1,2})\b/.exec(s);
+  if (m && +m[2] >= 1 && +m[2] <= 12) return m[1] + '-' + ('0' + m[2]).slice(-2);
+  m = /^([a-z]{3})[a-z]*[\s.\-_/]+(\d{4})$/.exec(s);
+  if (m && HIST_MONTHS.indexOf(m[1]) >= 0) return m[2] + '-' + ('0' + (HIST_MONTHS.indexOf(m[1]) + 1)).slice(-2);
+  return '';
+}
+// "7.10.26 motibhai.pdf" → "2026-10-07" (the date the file was named with), else ''.
+function histFileDate_(name) {
+  const m = /^(\d{1,2})[.\-_/](\d{1,2})[.\-_/](\d{2}|\d{4})\b/.exec(String(name || '').trim());
+  if (!m || +m[2] < 1 || +m[2] > 12 || +m[1] < 1 || +m[1] > 31) return '';
+  const y = m[3].length === 2 ? '20' + m[3] : m[3];
+  return y + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+}
+function histYmOf_(r) { const d = String(r.date || ''); return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d.slice(0, 7) : String(r.folder || '').slice(0, 7); }
+function histRows_(name, header) {
+  const sh = sheet_(name, header);
+  return { sh: sh, rows: values_(sh).map(function (v, i) { const o = { _row: i + 2 }; header.forEach(function (h, j) { o[h] = v[j] === undefined ? '' : v[j]; }); return o; }) };
+}
+
+// The folders under "EBSC Invoices Records" (the owner ticks the shops to read).
+function histFolders_(body) {
+  let root = null;
+  try {
+    if (body && body.rootId) root = DriveApp.getFolderById(String(body.rootId));
+    else { const it = DriveApp.getFoldersByName(HIST_ROOT_NAME); if (it.hasNext()) root = it.next(); }
+  } catch (e) { root = null; }
+  if (!root) return { ok: false, error: 'The folder "' + HIST_ROOT_NAME + '" was not found in the Google Drive of the cloud. In Google Drive (signed in as easybuylautoka), share it with easybuys.projects@gmail.com; then, signed in as easybuys.projects, open Shared with me, right-click the folder › Organise › Add shortcut › My Drive, and try again.' };
+  const out = [];
+  const it = root.getFolders();
+  while (it.hasNext()) { const f = it.next(); out.push({ id: f.getId(), name: f.getName() }); }
+  out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+  return { ok: true, root: { id: root.getId(), name: root.getName() }, folders: out };
+}
+
+// Start (or change) the reading: { shops: [{ id, name }], before: 'YYYY-MM-DD' }.
+function histStart_(body, who) {
+  const shops = (Array.isArray(body.shops) ? body.shops : []).filter(function (s) { return s && s.id; }).slice(0, 10)
+    .map(function (s) { return { id: String(s.id), name: cleanPart_(s.name || 'Shop').slice(0, 60) }; });
+  if (!shops.length) return { ok: false, error: 'Tick at least one shop folder.' };
+  const before = /^\d{4}-\d{2}-\d{2}$/.test(String(body.before || '')) ? String(body.before) : '2026-11-01';
+  const old = histJob_();
+  const same = old && old.before === before && JSON.stringify(old.shops.map(function (s) { return s.id; })) === JSON.stringify(shops.map(function (s) { return s.id; }));
+  const job = same ? old : { shops: shops, before: before, stack: shops.map(function (s) { return { id: s.id, shop: s.name, ym: '' }; }), listed: false, started_at: now_(), by: who && who.user ? who.user.name : '' };
+  job.shops = shops; job.paused = false;
+  histSetJob_(job);
+  histTrigger_(true);
+  return histStatus_();
+}
+function histTrigger_(on) {
+  try {
+    const all = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'histRun'; });
+    if (on && !all.length) ScriptApp.newTrigger('histRun').timeBased().everyMinutes(10).create();
+    if (!on) all.forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  } catch (e) { /* the owner can run histRun from the editor once to allow it */ }
+}
+function histPause_(on) {
+  const job = histJob_();
+  if (!job) return { ok: false, error: 'Nothing is being read.' };
+  job.paused = !!on; histSetJob_(job); histTrigger_(!on);
+  return histStatus_();
+}
+
+function histStatus_() {
+  const job = histJob_();
+  const q = histRows_('H_queue', HIST_Q_HEADER).rows;
+  const inv = histRows_('H_invoices', HIST_INV_HEADER).rows;
+  const n = function (f) { return q.filter(f).length; };
+  const run = histRunInfo_();
+  return {
+    ok: true, version: SCRIPT_VERSION,
+    job: job ? { shops: job.shops, before: job.before, listed: !!job.listed, paused: !!job.paused, started_at: job.started_at, by: job.by } : null,
+    files: q.length, read: n(function (r) { return r.state === 'done'; }), left: n(function (r) { return !r.state || r.state === 'retry'; }),
+    failed: n(function (r) { return r.state === 'failed' || r.state === 'too_big'; }),
+    invoices: inv.filter(function (r) { return ['ok', 'fixed'].indexOf(r.status) >= 0; }).length,
+    open: inv.filter(function (r) { return r.status === 'check'; }).length,
+    last_run: run.at || '', last_error: run.error || '', wait_until: run.wait_until || '',
+  };
+}
+
+// ---------------------------------------------------------------- the background run
+function histRun() { return entry_(function () { return histRunNow_(Date.now() + HIST_RUN_MS); }); }
+function histRunNow_(deadline) {
+  const job = histJob_();
+  if (!job || job.paused) return { ok: true, skipped: 'no job' };
+  const props = PropertiesService.getScriptProperties();
+  const run = histRunInfo_();
+  if (run.running_until && run.running_until > Date.now()) return { ok: true, skipped: 'running' };
+  if (run.wait_until && run.wait_until > now_()) return { ok: true, skipped: 'waiting' };
+  run.running_until = deadline + 60000; histSetRun_(run);
+  let did = { listed: 0, read: 0 };
+  try {
+    if (!job.listed) did.listed = histList_(job, deadline);
+    if (job.listed) did.read = histReadSome_(job, deadline, run);
+    run.error = run.error && did.read ? '' : run.error;
+  } catch (e) {
+    run.error = String(e && e.message ? e.message : e).slice(0, 300);
+  } finally {
+    run.running_until = 0; run.at = now_(); histSetRun_(run);
+  }
+  // all read: no more runs (Start again picks up anything new)
+  const st = histStatus_();
+  if (job.listed && !st.left) histTrigger_(false);
+  void props;
+  return { ok: true, did: did };
+}
+// Finds every PDF / photo under the ticked shop folders (folder by folder, carrying on in the next run).
+function histList_(job, deadline) {
+  const qq = histRows_('H_queue', HIST_Q_HEADER);
+  const have = {};
+  qq.rows.forEach(function (r) { have[r.file_id] = true; });
+  const add = [];
+  let found = 0;
+  while (job.stack.length && Date.now() < deadline) {
+    const top = job.stack.shift();
+    let f;
+    try { f = DriveApp.getFolderById(top.id); } catch (e) { continue; }
+    const ym = histFolderYm_(f.getName()) || top.ym;
+    if (ym && ym + '-01' >= job.before) continue; // from the cut-off on, the app's own records
+    const subs = f.getFolders();
+    while (subs.hasNext()) { const s = subs.next(); job.stack.push({ id: s.getId(), shop: top.shop, ym: ym }); }
+    const files = f.getFiles();
+    while (files.hasNext()) {
+      const x = files.next();
+      const mime = String(x.getMimeType() || '');
+      if (!/pdf|image\/(jpe?g|png|webp|heic)/i.test(mime) || have[x.getId()]) continue;
+      have[x.getId()] = true;
+      add.push([x.getId(), top.shop, ym, x.getName(), x.getUrl(), mime, String(x.getSize ? x.getSize() : ''), '', '0', '', '']);
+      found += 1;
+    }
+    if (add.length >= 200) { qq.sh.getRange(qq.sh.getLastRow() + 1, 1, add.length, add[0].length).setValues(add); add.length = 0; }
+  }
+  if (add.length) qq.sh.getRange(qq.sh.getLastRow() + 1, 1, add.length, add[0].length).setValues(add);
+  if (!job.stack.length) job.listed = true;
+  histSetJob_(job);
+  return found;
+}
+function histPrompt_() {
+  return [
+    'You read scanned supplier invoices of a grocery business in Fiji (currency FJD) for its VAT records. The file may hold ONE or SEVERAL invoices (or a delivery note, receipt or credit note): give each invoice once.',
+    'The BUYER is Easy Buys Shopping Centre (Easy Buys Shopping Center, Easy Buy, EBSC), TIN 50-14315-0-7, Lautoka. The buyer is NEVER the supplier.',
+    'Fiji VAT was 15% until 31 July 2025 and is 12.5% from 1 August 2025; some goods are zero rated (VAT 0). VEP = excluding VAT, VIP = including VAT. VAT is an amount in dollars, never the percentage.',
+    'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Only the totals are needed, not the item lines. Do not take the SDC / VMS fiscal number as the invoice number.',
+    'Give numbers as plain numbers (no $ or commas); null for anything not on the invoice or not readable. If nothing can be read, give an empty list and say why in notes.',
+  ].join('\n');
+}
+function histSchema_() {
+  const n = function (d) { return { type: 'NUMBER', nullable: true, description: d }; };
+  const s = function (d) { return { type: 'STRING', nullable: true, description: d }; };
+  return {
+    type: 'OBJECT',
+    properties: {
+      invoices: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+        supplier: s('The company that SOLD the goods and issued the invoice'),
+        supplier_tin: s("The supplier's TIN / VAT number, digits only (never 50-14315-0-7)"),
+        invoice_no: s("The supplier's invoice number"),
+        invoice_date: s('The invoice date as YYYY-MM-DD'),
+        subtotal_excl: n('Total before VAT'),
+        vat: n('Total VAT in dollars'),
+        total_incl: n('Total including VAT'),
+        zero_rated: n('The part of the total that is zero rated (no VAT), if shown'),
+        credit_note: { type: 'BOOLEAN', nullable: true, description: 'true for a credit note / refund' },
+        confidence: n('How sure you are of the figures, 0 to 1'),
+        notes: s('Anything unclear'),
+      } } },
+      notes: s('Anything about the whole file: not an invoice, cannot be read, pages missing'),
+    },
+    required: ['invoices'],
+  };
+}
+// Reads files from the queue until the time is up. → how many files were read.
+function histReadSome_(job, deadline, run) {
+  const qq = histRows_('H_queue', HIST_Q_HEADER);
+  const iv = histRows_('H_invoices', HIST_INV_HEADER);
+  const seen = {};
+  iv.rows.forEach(function (r) { if (['ok', 'fixed', 'check'].indexOf(r.status) >= 0) seen[histDupKey_(r)] = r.file; });
+  let done = 0;
+  const todo = qq.rows.filter(function (r) { return !r.state || r.state === 'retry'; });
+  for (let i = 0; i < todo.length; i++) {
+    if (Date.now() + HIST_FILE_MS > deadline) break;
+    const q = todo[i];
+    const tries = (Number(q.tries) || 0) + 1;
+    const mark = function (state, why) { qq.sh.getRange(q._row, 8, 1, 4).setValues([[state, String(tries), now_(), String(why || '').slice(0, 200)]]); };
+    let file;
+    try { file = DriveApp.getFileById(q.file_id); } catch (e) { mark('failed', 'The file is gone or not shared.'); histOpen_(iv, q, 'The file could not be opened (gone or not shared).'); continue; }
+    const size = Number(q.size) || (file.getSize ? file.getSize() : 0);
+    if (size > HIST_MAX_BYTES) { mark('too_big', 'Too big to read'); histOpen_(iv, q, 'The file is too big for the reader (' + Math.round(size / 1048576) + ' MB) – enter it by hand.'); done += 1; continue; }
+    const blob = file.getBlob();
+    const data = Utilities.base64Encode(blob.getBytes());
+    const res = aiReadInvoice_([{ mimeType: /pdf/i.test(q.mime) ? 'application/pdf' : 'image/jpeg', data: data }], {}, { prompt: histPrompt_(), schema: histSchema_() });
+    if (!res.ok) {
+      if (res.code === 'NO_AI_KEY') { run.error = res.error; break; }
+      if (/limit is used up/i.test(res.error)) { run.error = 'The free AI limit is used up for today – reading carries on by itself later.'; run.wait_until = new Date(Date.now() + 3600000).toISOString(); break; }
+      if (tries < 3) { mark('retry', res.error); continue; }
+      mark('failed', res.error); histOpen_(iv, q, 'Could not be read: ' + String(res.error).replace(/^AI_ERROR:\s*/, '')); done += 1; continue;
+    }
+    const list = (res.invoice && Array.isArray(res.invoice.invoices)) ? res.invoice.invoices : [];
+    if (!list.length) histOpen_(iv, q, 'No invoice could be read in it' + (res.invoice && res.invoice.notes ? ': ' + res.invoice.notes : '.'));
+    list.forEach(function (x, k) {
+      const sign = x && x.credit_note ? -1 : 1;
+      const r = {
+        key: q.file_id + '#' + (k + 1), file_id: q.file_id, shop: q.shop, folder: q.folder, file: q.file, url: q.url,
+        supplier: String(x.supplier || '').slice(0, 80), tin: String(x.supplier_tin || '').replace(/[^0-9]/g, '').slice(0, 20),
+        invoice_no: String(x.invoice_no || '').slice(0, 40), date: /^\d{4}-\d{2}-\d{2}$/.test(String(x.invoice_date || '')) ? String(x.invoice_date) : histFileDate_(q.file),
+        subtotal: histNum_(x.subtotal_excl), vat: histNum_(x.vat), total: histNum_(x.total_incl), zero: histNum_(x.zero_rated),
+        by: 'reader', at: now_(), model: res.model || '',
+      };
+      ['subtotal', 'vat', 'total', 'zero'].forEach(function (c) { if (r[c] !== null) r[c] = histR2_(sign * Math.abs(r[c])); });
+      const chk = histCheck_(r, job.before, seen, x);
+      r.status = chk.status; r.why = chk.why;
+      if (chk.status === 'ok' || chk.status === 'check') seen[histDupKey_(r)] = q.file;
+      iv.sh.appendRow(HIST_INV_HEADER.map(function (h) { return r[h] === null || r[h] === undefined ? '' : String(r[h]); }));
+    });
+    mark('done', list.length + ' invoice(s)');
+    done += 1;
+  }
+  return done;
+}
+function histDupKey_(r) { return [String(r.tin || r.supplier || '').toLowerCase().replace(/[^a-z0-9]/g, ''), String(r.invoice_no || '').toLowerCase().replace(/[^a-z0-9]/g, ''), String(histR2_(r.total))].join('|'); }
+// An open item: a file that could not be read (the owner opens the PDF and types it in).
+function histOpen_(iv, q, why) {
+  iv.sh.appendRow(HIST_INV_HEADER.map(function (h) {
+    const r = { key: q.file_id + '#0', file_id: q.file_id, shop: q.shop, folder: q.folder, file: q.file, url: q.url, date: histFileDate_(q.file), status: 'check', why: why, by: 'reader', at: now_() };
+    return r[h] === undefined ? '' : String(r[h]);
+  }));
+}
+// ok – counted in the VAT; check – an open item (not counted until the owner says so); after – dated from the cut-off
+// on (the app's own records); dup – the same invoice already read from another file.
+function histCheck_(r, before, seen, x) {
+  if (r.date && r.date >= before) return { status: 'after', why: 'Dated ' + r.date + ' – from the cut-off on (in the app already).' };
+  if (r.total === null || r.vat === null) return { status: 'check', why: 'The total or the VAT could not be read.' };
+  if (!r.date) return { status: 'check', why: 'The date could not be read.' };
+  if (seen[histDupKey_(r)]) return { status: 'dup', why: 'The same invoice was read from ' + seen[histDupKey_(r)] + '.' };
+  const tot = Math.abs(r.total); const vat = Math.abs(r.vat);
+  if (r.subtotal !== null && Math.abs(Math.abs(r.subtotal) + vat - tot) > 0.06) return { status: 'check', why: 'Before VAT + VAT is not the total.' };
+  if (vat > tot * 0.135 + 0.05) return { status: 'check', why: 'The VAT is more than 15% of the total.' };
+  if (x && x.confidence !== null && x.confidence !== undefined && Number(x.confidence) < 0.7) return { status: 'check', why: 'The reader was not sure of the figures' + (x.notes ? ': ' + String(x.notes).slice(0, 120) : '.') };
+  const ym = r.date.slice(0, 7);
+  if (r.folder && ym !== r.folder) {
+    const p = new Date(r.folder + '-01T00:00:00Z'); p.setUTCMonth(p.getUTCMonth() - 1);
+    const prev = p.toISOString().slice(0, 7);
+    if (ym !== prev) return { status: 'check', why: 'Dated ' + r.date + ' but it is in the ' + r.folder + ' folder.' };
+  }
+  return { status: 'ok', why: '' };
+}
+
+// ---------------------------------------------------------------- the months
+function histSalesOf_(json, ym) {
+  let s = {};
+  try { s = JSON.parse(json || '{}') || {}; } catch (e) { s = {}; }
+  let std = 0; let zero = 0; let vat = 0;
+  if (s.mode === 'day') {
+    Object.keys(s.days || {}).forEach(function (d) {
+      const a = histNum_(s.days[d].std) || 0; const z = histNum_(s.days[d].zero) || 0;
+      const rate = histVatRate_(ym + '-' + ('0' + d).slice(-2));
+      std += a; zero += z; vat += a * rate / (100 + rate);
+    });
+  } else {
+    const a = histNum_(s.month && s.month.std) || 0; const z = histNum_(s.month && s.month.zero) || 0;
+    const rate = histVatRate_(ym + '-01');
+    std = a; zero = z; vat = a * rate / (100 + rate);
+  }
+  return { mode: s.mode === 'day' ? 'day' : 'month', std: histR2_(std), zero: histR2_(zero), vat: histR2_(vat), entered: !!(std || zero), detail: s };
+}
+function histMonths_() {
+  const job = histJob_();
+  const inv = histRows_('H_invoices', HIST_INV_HEADER).rows;
+  const sales = histRows_('H_sales', HIST_SALES_HEADER).rows;
+  const closed = histClosed_();
+  const m = {};
+  const get = function (ym) { if (!m[ym]) m[ym] = { ym: ym, invoices: 0, open: 0, input_vat: 0, purchases: 0, sales_std: 0, sales_zero: 0, output_vat: 0, shops_entered: 0, closed: closed[ym] || null }; return m[ym]; };
+  inv.forEach(function (r) {
+    const ym = histYmOf_(r);
+    if (!/^\d{4}-\d{2}$/.test(ym) || r.status === 'after') return;
+    const x = get(ym);
+    if (r.status === 'ok' || r.status === 'fixed') { x.invoices += 1; x.input_vat += Number(r.vat) || 0; x.purchases += Number(r.total) || 0; }
+    if (r.status === 'check') x.open += 1;
+  });
+  sales.forEach(function (r) {
+    const x = get(r.ym); const s = histSalesOf_(r.json, r.ym);
+    x.sales_std += s.std; x.sales_zero += s.zero; x.output_vat += s.vat; if (s.entered) x.shops_entered += 1;
+  });
+  const out = Object.keys(m).sort().reverse().map(function (k) {
+    const x = m[k];
+    ['input_vat', 'purchases', 'sales_std', 'sales_zero', 'output_vat'].forEach(function (c) { x[c] = histR2_(x[c]); });
+    x.net = histR2_(x.output_vat - x.input_vat); x.rate = histVatRate_(k + '-01');
+    return x;
+  }).filter(function (x) { return !job || x.ym + '-01' < job.before; });
+  return { ok: true, months: out, shops: job ? job.shops.map(function (s) { return s.name; }) : [] };
+}
+function histMonth_(ym) {
+  if (!/^\d{4}-\d{2}$/.test(String(ym || ''))) return { ok: false, error: 'Which month?' };
+  const job = histJob_();
+  const inv = histRows_('H_invoices', HIST_INV_HEADER).rows.filter(function (r) { return histYmOf_(r) === ym; })
+    .map(function (r) { const o = {}; HIST_INV_HEADER.forEach(function (h) { o[h] = r[h]; }); ['subtotal', 'vat', 'total', 'zero'].forEach(function (c) { o[c] = histNum_(o[c]); }); return o; })
+    .sort(function (a, b) { return (a.status === 'check' ? 0 : 1) - (b.status === 'check' ? 0 : 1) || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0); });
+  const sales = {};
+  histRows_('H_sales', HIST_SALES_HEADER).rows.filter(function (r) { return r.ym === ym; }).forEach(function (r) { sales[r.shop] = histSalesOf_(r.json, ym); });
+  const sum = (histMonths_().months.filter(function (x) { return x.ym === ym; })[0]) || { ym: ym, invoices: 0, open: 0, input_vat: 0, purchases: 0, sales_std: 0, sales_zero: 0, output_vat: 0, net: 0, rate: histVatRate_(ym + '-01'), closed: histClosed_()[ym] || null };
+  return { ok: true, ym: ym, summary: sum, invoices: inv, sales: sales, shops: job ? job.shops.map(function (s) { return s.name; }) : Object.keys(sales) };
+}
+function histNeedOpen_(ym) {
+  const c = histClosed_()[ym];
+  return c ? { ok: false, closed: true, error: 'This month was closed by ' + (c.by || 'the owner') + ' – the owner or an admin opens it again first.' } : null;
+}
+// The owner fixes an invoice: { ikey (not key – that is the cloud key), action: 'ok' | 'exclude' | 'edit', fields }, or adds one: { action: 'add', fields }.
+function histFix_(body, who) {
+  const iv = histRows_('H_invoices', HIST_INV_HEADER);
+  const by = who && who.user ? who.user.name : '';
+  const f = body.fields || {};
+  if (body.action === 'add') {
+    const ym = String(f.date || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(f.date || ''))) return { ok: false, error: 'The invoice date is needed.' };
+    const no = histNeedOpen_(ym); if (no) return no;
+    const r = { key: 'typed-' + Utilities.getUuid(), shop: cleanPart_(f.shop || '').slice(0, 60), folder: ym, file: 'typed by ' + by, supplier: String(f.supplier || '').slice(0, 80), tin: String(f.tin || '').replace(/[^0-9]/g, ''), invoice_no: String(f.invoice_no || '').slice(0, 40), date: f.date,
+      subtotal: histNum_(f.subtotal), vat: histNum_(f.vat), total: histNum_(f.total), zero: histNum_(f.zero), status: 'fixed', why: 'Typed in', by: by, at: now_() };
+    if (r.total === null || r.vat === null) return { ok: false, error: 'The total and the VAT are needed.' };
+    iv.sh.appendRow(HIST_INV_HEADER.map(function (h) { return r[h] === null || r[h] === undefined ? '' : String(r[h]); }));
+    return { ok: true, key: r.key };
+  }
+  const row = iv.rows.filter(function (r) { return r.key === String(body.ikey || ''); })[0];
+  if (!row) return { ok: false, error: 'That invoice was not found.' };
+  const no = histNeedOpen_(histYmOf_(row)); if (no) return no;
+  const next = {}; HIST_INV_HEADER.forEach(function (h) { next[h] = row[h]; });
+  if (body.action === 'exclude') { next.status = 'excluded'; next.why = String(body.reason || 'Left out by ' + by).slice(0, 200); }
+  else if (body.action === 'ok') { if (histNum_(next.total) === null || histNum_(next.vat) === null) return { ok: false, error: 'Type the total and the VAT first.' }; next.status = 'fixed'; next.why = 'Checked by ' + by; }
+  else if (body.action === 'edit') {
+    ['supplier', 'invoice_no', 'shop'].forEach(function (c) { if (f[c] !== undefined) next[c] = String(f[c]).slice(0, 80); });
+    if (f.tin !== undefined) next.tin = String(f.tin).replace(/[^0-9]/g, '');
+    if (f.date !== undefined) { if (!/^\d{4}-\d{2}-\d{2}$/.test(String(f.date))) return { ok: false, error: 'The date is YYYY-MM-DD.' }; next.date = f.date; const no2 = histNeedOpen_(String(f.date).slice(0, 7)); if (no2) return no2; }
+    ['subtotal', 'vat', 'total', 'zero'].forEach(function (c) { if (f[c] !== undefined) next[c] = histNum_(f[c]); });
+    if (histNum_(next.total) === null || histNum_(next.vat) === null) return { ok: false, error: 'The total and the VAT are needed.' };
+    next.status = 'fixed'; next.why = 'Corrected by ' + by;
+  } else return { ok: false, error: 'What should happen to it?' };
+  next.by = by; next.at = now_();
+  iv.sh.getRange(row._row, 1, 1, HIST_INV_HEADER.length).setValues([HIST_INV_HEADER.map(function (h) { return next[h] === null || next[h] === undefined ? '' : String(next[h]); })]);
+  return { ok: true };
+}
+// The sales of one shop for one month: { ym, shop, mode: 'day' | 'month', days: { '01': { std, zero } }, month: { std, zero } }.
+function histSalesSave_(body, who) {
+  const ym = String(body.ym || '');
+  if (!/^\d{4}-\d{2}$/.test(ym)) return { ok: false, error: 'Which month?' };
+  const no = histNeedOpen_(ym); if (no) return no;
+  const shop = cleanPart_(body.shop || '').slice(0, 60);
+  if (!shop) return { ok: false, error: 'Which shop?' };
+  const clean = function (o) { const a = histNum_(o && o.std); const z = histNum_(o && o.zero); if ((a !== null && a < 0) || (z !== null && z < 0)) throw new Error('Sales cannot be below zero.'); return { std: a === null ? '' : histR2_(a), zero: z === null ? '' : histR2_(z) }; };
+  let data;
+  try {
+    data = body.mode === 'day'
+      ? { mode: 'day', days: Object.keys(body.days || {}).filter(function (d) { return /^\d{1,2}$/.test(d) && +d >= 1 && +d <= 31; }).reduce(function (o, d) { const c = clean(body.days[d]); if (c.std !== '' || c.zero !== '') o[('0' + d).slice(-2)] = c; return o; }, {}) }
+      : { mode: 'month', month: clean(body.month) };
+  } catch (e) { return { ok: false, error: e.message }; }
+  const ss = histRows_('H_sales', HIST_SALES_HEADER);
+  const key = ym + '|' + shop;
+  const row = ss.rows.filter(function (r) { return r.key === key; })[0];
+  const vals = [key, ym, shop, JSON.stringify(data), now_(), who && who.user ? who.user.name : ''];
+  if (row) ss.sh.getRange(row._row, 1, 1, vals.length).setValues([vals]); else ss.sh.appendRow(vals);
+  return { ok: true, sales: histSalesOf_(JSON.stringify(data), ym) };
+}
+function histClose_(body, who, open) {
+  const ym = String(body.ym || '');
+  if (!/^\d{4}-\d{2}$/.test(ym)) return { ok: false, error: 'Which month?' };
+  const c = histClosed_();
+  if (open) delete c[ym];
+  else {
+    const m = histMonth_(ym);
+    if (m.summary.open) return { ok: false, error: m.summary.open + ' invoice(s) of this month are still open – check or leave out each one first.' };
+    c[ym] = { by: who && who.user ? who.user.name : '', at: now_(), output_vat: m.summary.output_vat, input_vat: m.summary.input_vat, net: m.summary.net };
+  }
+  PropertiesService.getScriptProperties().setProperty('HIST_CLOSED', JSON.stringify(c));
+  log_('History', [ym, open ? 'opened again' : 'closed', who && who.user ? who.user.name : '']);
+  return { ok: true, closed: c[ym] || null };
+}
+function histRoute_(body, who) {
+  const what = 'The invoices from before the app';
+  const need = needOwner_(who, body, what);
+  if (need) return need;
+  switch (body.kind) {
+    case 'hist_folders': return histFolders_(body);
+    case 'hist_start': return histStart_(body, who);
+    case 'hist_pause': return histPause_(true);
+    case 'hist_resume': return histPause_(false);
+    case 'hist_status': return histStatus_();
+    case 'hist_months': return histMonths_();
+    case 'hist_month': return histMonth_(body.ym);
+    case 'hist_fix': return histFix_(body, who);
+    case 'hist_sales': return histSalesSave_(body, who);
+    case 'hist_close': return histClose_(body, who, false);
+    case 'hist_reopen': return histClose_(body, who, true);
+    default: return { ok: false, error: 'Unknown request: ' + body.kind };
+  }
 }
