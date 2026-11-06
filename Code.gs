@@ -145,7 +145,7 @@ function route_(body, who) {
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
     if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who, Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
       // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
-      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.user = who.user ? who.user.role : null; return json_(out); }
+      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.deviceRole = roleOf_(who) || null; out.user = who.user ? who.user.role : null; return json_(out); }
     if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
     if (body.kind === 'invite_cancel') return json_(needOwner_(who, body, 'Cancelling an invite') || inviteCancel_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
@@ -1114,10 +1114,12 @@ function pull_(since, deviceId, forMain, who, limit) {
   const list = changes.getRange(start, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
   const want = [];
   const seen = {};
+  const hidden = forMain ? {} : hiddenFor_(who);
   list.forEach(function (c, i) {
     const table = String(c[1]);
     if (!forMain && String(c[4]) === String(deviceId)) return;
     if (!forMain && table === 'audit_log' && !who.admin) return;
+    if (!forMain && hidden[table]) return; // 1.0.0 build 16: not for this device's role (DEVICE_ROLES)
     const id = table + '|' + c[2];
     if (seen[id]) return;
     seen[id] = true;
@@ -1152,7 +1154,8 @@ function pull_(since, deviceId, forMain, who, limit) {
 // for every login again (users_all) – the PINs it may now have come at once, not only with each person's next change.
 function access_(who) {
   if (!who || who.forMain) return 'main';
-  return (who.admin ? 'A' : 'S') + '|' + String((ctlAll_()[who.deviceId] || {}).shop || '');
+  const c = ctlAll_()[who.deviceId] || {};
+  return (who.admin ? 'A' : 'S') + '|' + String(c.shop || '') + (c.role ? '|' + c.role : '');
 }
 function usersAll_(who) {
   const sh = data_().getSheetByName('T_users');
@@ -1198,7 +1201,7 @@ function devices_() {
   return deviceRows_().map(function (r) {
     const c = all[String(r[0])] || {};
     return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8],
-      until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
+      until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, role: c.role || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
       attempts: c.attempts || [], waitingCmds: (c.cmds || []).length, wipe: c.wipe || null, lastLog: c.lastLog || null,
       admin: isAdminDevice_(String(r[0]), /cloud key/.test(String(r[9] || ''))), adminMarked: !!c.admin, signs: c.signs || null };
   });
@@ -1338,6 +1341,15 @@ function inviteCreate_(body, who) {
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'That email address does not look right.' };
   const url = String(body.url || '');
   sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), esc_((body.by || '') + ' @ ' + who.deviceId), email, '', '', uses, 0, '']);
+  // 1.0.0 build 16: an invite with the device's role (and shop) – the owner made it, so the device is allowed at once.
+  const role = DEVICE_ROLES[String(body.role || '')] ? String(body.role) : '';
+  if (role) {
+    const p = props_(); let m = {}; try { m = JSON.parse(p.getProperty('INVITE_ROLE') || '{}') || {}; } catch (e) { m = {}; }
+    const keep = {}; Object.keys(m).slice(-30).forEach(function (k) { keep[k] = m[k]; });
+    keep[code] = { role: role, shop: String(body.shop || '').slice(0, 10), by: who && who.user ? who.user.name : '' };
+    p.setProperty('INVITE_ROLE', JSON.stringify(keep));
+    if (role === 'owner') body.adminDevice = true;
+  }
   // 1.0.0 build 1: an invite for the owner's / an admin's own phone makes it an admin device when it joins.
   if (body.adminDevice) { const p = props_(); let l = []; try { l = JSON.parse(p.getProperty('INVITE_ADMIN') || '[]'); } catch (e) { l = []; } p.setProperty('INVITE_ADMIN', JSON.stringify(l.concat([code]).slice(-20))); }
   const link = linkCode_(url, code);
@@ -1417,7 +1429,10 @@ function join_(body) {
     if (inv[9]) return { ok: false, error: 'The owner cancelled this invite. Ask for a new QR code.' };
     if (usedN >= uses) return { ok: false, error: uses > 1 ? 'This QR code has been used by ' + uses + ' phones already. Ask for a new one.' : 'This invite has already been used. Ask for a new one.' };
     if (new Date(inv[2]).getTime() < Date.now()) return { ok: false, error: 'This invite has expired. Ask for a new one.' };
-    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
+    let invRole = null;
+    try { invRole = (JSON.parse(props_().getProperty('INVITE_ROLE') || '{}') || {})[code] || null; } catch (e) { invRole = null; }
+    // 1.0.0 build 16: an invite made with a role by the owner / an admin is their OK already
+    const approval = !invRole && PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
     if (existing && String(existing.v[3]) !== 'removed' && String(existing.v[4] || '')) { log_('Refused', [String(d.id), 'join with a device id already linked']); return { ok: false, error: 'A device with this id is already linked. Remove the old one first (Admin › Devices).' }; }
     if (existing) { existing.sh.getRange(existing.row, 4, 1, 2).setValues([[approval ? 'waiting' : 'active', sha_(token)]]); devicesChanged_(); }
     else touchDevice_(body, String(d.id), { status: approval ? 'waiting' : 'active', tokenHash: sha_(token), invitedBy: inv[3], note: 'invite ' + code });
@@ -1428,15 +1443,16 @@ function join_(body) {
     try { adminList = JSON.parse(props_().getProperty('INVITE_ADMIN') || '[]'); } catch (e) { adminList = []; }
     // one save for the device's control note (never stops the join: the device is linked already)
     const all0 = ctlAll_();
-    if (adminList.indexOf(code) >= 0 || nonceH || (all0[String(d.id)] && all0[String(d.id)].removedAt)) {
+    if (invRole || adminList.indexOf(code) >= 0 || nonceH || (all0[String(d.id)] && all0[String(d.id)].removedAt)) {
       const all = all0; const c = ctl_(all, String(d.id));
       delete c.removedAt;
       if (adminList.indexOf(code) >= 0) { c.admin = true; hist_(c, 'Joined as an admin device (owner\'s invite)', inv[3]); }
+      if (invRole) { c.role = invRole.role; if (invRole.shop) c.shop = invRole.shop; hist_(c, 'Joined as ' + DEVICE_ROLES[invRole.role].label + (invRole.shop ? ' (' + invRole.shop + ')' : ''), invRole.by || inv[3]); }
       if (nonceH) { c.joinNonce = nonceH; c.joinCode = code; c.joinAt = Date.now(); }
       ctlSaveSafe_(all);
     }
     secEvent_('device', { device: String(d.name || d.id), what: 'A new device joined with an invite' + (approval ? ' – it waits for your approval' : '') + (adminList.indexOf(code) >= 0 ? ' (as an admin device)' : ''), refused: false });
-    return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0 };
+    return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0, role: invRole ? invRole.role : null };
   } finally { lock.releaseLock(); REQ_.locked -= 1; }
 }
 
@@ -1549,7 +1565,7 @@ function devicePulled_(id, body, out) {
   if (body.stat && ((Math.abs(Number(body.stat.clockSkewMin) || 0) > 5) || (body.stat.tz && !/Fiji|^\+1[23]|^UTC\+12/.test(String(body.stat.tz)))) && !onceIn_('clock_' + id, 3600)) {
     secEvent_('clock', { device: String(c.name || id), what: 'Clock ' + (Number(body.stat.clockSkewMin) || 0) + ' minutes from Google\'s time; time zone ' + String(body.stat.tz || 'not said'), refused: false });
   }
-  out.control = { shop: c.shop || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
+  out.control = { shop: c.shop || null, role: c.role || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
   out.commands = c.cmds || [];
   c.cmds = [];
   // 1.0.0 build 10 (review): a pull never fails because the device-control note could not be saved
@@ -1560,7 +1576,7 @@ function onceIn_(key, secs) {
   try { const cache = CacheService.getScriptCache(); if (cache.get('once_' + key)) return true; cache.put('once_' + key, '1', secs); } catch (e) { /* no cache: not limited */ }
   return false;
 }
-const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin'];
+const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin', 'role'];
 function deviceControl_(body, who) {
   return withLock_(function () {
     const id = String(body.id || '');
@@ -1583,11 +1599,19 @@ function deviceControl_(body, who) {
     else if (a === 'roles') { c.roles = (body.roles || []).map(String); hist_(c, c.roles.length ? 'Only these roles may log in: ' + c.roles.join(', ') : 'Every role may log in', by); }
     else if (a === 'end') { const e = String(body.endDate || ''); if (e && !/^\d{4}-\d{2}-\d{2}$/.test(e)) return { ok: false, error: 'Choose the last day.' }; c.endDate = e || null; hist_(c, e ? 'Access ends after ' + e : 'No end date', by); }
     else if (a === 'wipe') { c.wipe = 'pending'; hist_(c, 'Wipe asked (on its next contact)', by); }
+    else if (a === 'role') {
+      // 1.0.0 build 16: the device's role (what it is sent); the owner's role makes it an admin device too
+      const r = String(body.role || '');
+      if (r && !DEVICE_ROLES[r]) return { ok: false, error: 'Choose the role.' };
+      if (r) c.role = r; else delete c.role;
+      if (r === 'owner') c.admin = true; else if (r) c.admin = false;
+      hist_(c, r ? 'Role: ' + DEVICE_ROLES[r].label : 'No role (gets everything)', by);
+    }
     else if (a === 'admin') { c.admin = !!body.on; hist_(c, c.admin ? 'Marked as an admin device (roles, PINs and locked settings may be changed on it)' : 'No longer an admin device', by); }
     else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
     ctlSave_(all);
     if (['block', 'allow', 'remove', 'rename'].indexOf(a) >= 0) devicesChanged_();
-    if (['wipe', 'remove', 'block', 'allow', 'admin'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
+    if (['wipe', 'remove', 'block', 'allow', 'admin', 'role'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { role: 'Role changed: ' + (DEVICE_ROLES[String(body.role || '')] ? DEVICE_ROLES[String(body.role)].label : 'none'), wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
     return { ok: true, devices: devices_() };
   });
 }
@@ -3278,6 +3302,11 @@ function jobLease_(body, who) {
       }
       // the backup and the accountant pack: an admin device only (being the main device is not enough – they need the
       // whole data). Not asked again for the job's time (staff phones used to ask under the write lock on every sync).
+      // 1.0.0 build 16: a shop / bakery device has only part of the data – it never takes a shared job
+      if (DEVICE_ROLES[roleOf_(who)] && DEVICE_ROLES[roleOf_(who)].noJobs) {
+        out[job] = { granted: false, holder: live ? cur.holder : '', holderName: live ? cur.name : '', until: new Date(now + 3600000).toISOString(), untilMs: now + 3600000, mark: markOf(), why: 'role' };
+        return;
+      }
       if (LEASE_ADMIN_JOBS.indexOf(job) >= 0 && !who.admin) {
         out[job] = { granted: false, holder: live ? cur.holder : '', holderName: live ? cur.name : '', until: new Date(now + ttl * 1000).toISOString(), untilMs: now + ttl * 1000, mark: markOf(), why: 'admin device only' };
         return;
@@ -3853,4 +3882,34 @@ function relayExport_(x) {
     return { ok: true, props: keep };
   }
   return { ok: false, error: 'What should be exported?' };
+}
+
+
+// ================================================================ 1.0.0 build 16: the device's role
+// Owner, 7 Nov: "the hassle of getting a new device hooked on … sync dependent on the role I give while giving access".
+// The role is chosen when the owner makes the QR code (and can be changed in Devices). Each pull leaves out what the
+// role must not have; a shop or bakery device never takes a shared job (they need the whole data). A device without a
+// role (linked before build 16) gets everything, as before.
+const PAYROLL_TABLES = ['pay_profiles', 'staff_debts', 'staff_charges', 'pay_runs', 'pay_lines', 'stat_payments', 'pay_signoffs', 'pay_slip_status', 'tax_proofs', 'tax_returns', 'tax_return_versions'];
+const BOOKS_TABLES = ['gl_accounts', 'gl_journals', 'fixed_assets', 'gl_budgets', 'aronium_batches', 'gl_recurring', 'gl_year_close', 'accountant_queries'];
+const OWNER_TABLES = ['owner_moves', 'personal_regulars', 'myday_items', 'myday_marks'];
+const OFFICE_TABLES = ['bank_entries', 'bank_statements', 'bank_lines', 'bank_checks', 'bank_closings', 'wallet_imports', 'wallet_lines', 'loan_entries', 'regular_terms', 'regular_receipts',
+  'loan_statements', 'loan_recons', 'supplier_statements', 'job_openings', 'applicants', 'onboarding', 'signatures', 'contracts', 'documents', 'issued_docs', 'staff_details',
+  'staff_credit_imports', 'staff_credit_balances', 'credit_settlements', 'bin_records', 'bin_parts'];
+const DEVICE_ROLES = {
+  owner: { label: 'the owner\'s / an admin\'s device', hide: [] },
+  manager: { label: 'a manager / office device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES) },
+  staff: { label: 'a shop / staff device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES, OFFICE_TABLES), noJobs: true },
+  bakery: { label: 'the bakery device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES, OFFICE_TABLES), noJobs: true },
+};
+function roleOf_(who) {
+  if (!who || who.forMain || who.viaKey) return '';
+  const r = String((ctlAll_()[String(who.deviceId)] || {}).role || '');
+  return DEVICE_ROLES[r] ? r : '';
+}
+function hiddenFor_(who) {
+  const r = DEVICE_ROLES[roleOf_(who)];
+  const out = {};
+  if (r && !(who && who.admin)) r.hide.forEach(function (t) { out[t] = true; });
+  return out;
 }
