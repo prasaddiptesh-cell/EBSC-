@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 20;                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
+const SCRIPT_VERSION = 21;                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
+// script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
 // script 19:                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
 // script 18:                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
@@ -2592,10 +2593,27 @@ function shopChange_(table, row, haveRow, boss, who) {
   if (!mine) return null;
   let before = null;
   if (haveRow) { try { before = JSON.parse(haveRow[4] || 'null'); } catch (e) { before = null; } }
+  if (linkWrite_(table, row, before)) return null;
   const s1 = row && row.shop_code ? String(row.shop_code) : '';
   const s0 = before && before.shop_code ? String(before.shop_code) : '';
   if ((s1 && s1 !== mine) || (s0 && s0 !== mine)) return 'This record belongs to the other shop – only that shop, the owner or admin can change it.';
   return null;
+}
+
+// Script 21 (owner's security alert, 7 Nov: "inv_moves SL-S2-… belongs to the other shop … 473 more"): the Aronium
+// link is a shared job – whichever device has it reads BOTH shops' tills, whoever is logged in on it. What it writes is
+// the tills' own figures, so the shop rule does not apply: a day's sales line (SL-<shop>-<date>-<code>, a sale from
+// Aronium), an End of day it filled in (source "link") and a till's reply to the link's check (aronium_feed "pong").
+// Nothing else is let through – a person's own change to the other shop is still refused.
+function linkWrite_(table, row, before) {
+  if (!row) return false;
+  if (table === 'inv_moves') {
+    const linkSale = function (r) { return !!r && r.type === 'sale' && r.ref_type === 'aronium' && String(r.uid || '').indexOf('SL-' + String(r.shop_code || '') + '-') === 0; };
+    return linkSale(row) && (!before || linkSale(before));
+  }
+  if (table === 'aronium_eods') return row.source === 'link' && (!before || String(before.shop_code || '') === String(row.shop_code || ''));
+  if (table === 'aronium_feed') return row.kind === 'pong' && (!before || before.kind === 'pong');
+  return false;
 }
 
 // ---------------------------------------------------------------- email logins (for the online version later)
