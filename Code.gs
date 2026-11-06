@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 20;                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
+const SCRIPT_VERSION = 21;                // 1.0.0 build 16 (7 Nov): the bridge for the Easy Buys cloud on Cloudflare (relay_: Drive, email, AI readers, the dashboard, a copy of every change) and the one-time copy of the data (relay_export)
+// script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
 // script 19:                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
 // script 18:                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
 const SUPPORT_EMAIL = 'prasaddiptesh@gmail.com'; // "Send to support" problem reports (Admin & support)
@@ -113,6 +114,8 @@ function doPost(e) {
     if (body.kind === 'main_files' || body.kind === 'main_file_get') return json_(mainFiles_(body)); // v3.5 Windows software: full file mirror
     // --- 1.0.0 build 1: a till PC's own key (its Aronium records and its link check only) ---
     if (body.kind === 'link_push' || body.kind === 'link_check') return json_(linkApi_(body));
+    // --- 1.0.0 build 16 (script 21): the Easy Buys cloud on Cloudflare asking for what only Google does (see relay_) ---
+    if (body.kind === 'relay') return json_(relay_(body));
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
     // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
@@ -125,6 +128,18 @@ function doPost(e) {
     // 1.0.0 build 1 (script 12): PINs in the cloud copy are hashed once (and every PIN that arrives is hashed).
     try { migratePins_(); } catch (x) { /* tried again on the next request */ }
     who.user = sessionUser_(body, who);
+    REQ_.who = who; // 1.0.0 build 16: the Cloudflare cloud copies an accepted change to Google as this device
+    return route_(body, who);
+  } catch (err) {
+    // 1.0.0 build 10: the write lock was not free within a few seconds – answer at once (the app tries again in a moment)
+    // instead of hanging until the app gives up ("Aborted").
+    if (err && err.busy) return json_(busyReply_());
+    return json_({ ok: false, error: String(err && err.message ? err.message : err) });
+  } finally { flushLater_(); }
+}
+// 1.0.0 build 16 (script 21): everything after the device is known, in its own function – the Cloudflare cloud's
+// bridge (relay_) runs the Google-only requests (Drive, email, the AI readers …) through the same code.
+function route_(body, who) {
     if (body.kind === 'user_login') return json_(userLogin_(body, who));
     if (body.kind === 'link_pull_request') return json_(linkPullRequest_(body, who));
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
@@ -446,12 +461,6 @@ function doPost(e) {
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
     }
-  } catch (err) {
-    // 1.0.0 build 10: the write lock was not free within a few seconds – answer at once (the app tries again in a moment)
-    // instead of hanging until the app gives up ("Aborted").
-    if (err && err.busy) return json_(busyReply_());
-    return json_({ ok: false, error: String(err && err.message ? err.message : err) });
-  } finally { flushLater_(); }
 }
 function busyReply_() { return { ok: false, busy: true, retryMs: 1500 + Math.floor(Math.random() * 2500), error: 'The cloud is busy – trying again.' }; }
 
@@ -3767,4 +3776,81 @@ function histRoute_(body, who) {
     case 'hist_reopen': return histClose_(body, who, true);
     default: return { ok: false, error: 'Unknown request: ' + body.kind };
   }
+}
+
+
+// ================================================================ 1.0.0 build 16 (script 21): the bridge to Cloudflare
+// Owner, 7 Nov: "fast sync … we transfer to Cloudflare". The phones and tablets sync with the Easy Buys cloud on
+// Cloudflare (the same code, in memory: much faster). What only Google can do stays here and the Cloudflare cloud asks
+// for it on the device's behalf: photos and files in Drive, emails, the AI invoice / bill readers, Viber, the calendar,
+// backups, the invoices from before the app, the online dashboard – and a copy of every change it accepts, so this
+// spreadsheet stays a full backup. Each request is signed with RELAY_KEY (Project settings › Script properties – the
+// same secret as in Cloudflare); none is accepted twice or after 10 minutes. relay_export gives the data once, for the
+// move. Without RELAY_KEY nothing here works.
+const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'pack_email',
+  'support_email', 'viber', 'viber_setup', 'myday_events', 'myday_out', 'calendar', 'fccc_lpg', 'setup_pack', 'tidy_records', 'snapshot',
+  'backup', 'backup_part', 'backup_done', 'backup_list', 'backup_get', 'backup_get_part', 'problem_log', 'problem_log_get',
+  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen'];
+// The Cloudflare cloud checks the device and its login here before asking Google for a Google-only request.
+function authOnly_(body) {
+  REQ_ = {};
+  try {
+    const who = auth_(body);
+    if (who.ok) who.user = sessionUser_(body, who);
+    return who;
+  } finally { flushLater_(); }
+}
+function relayHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
+function relaySig_(text, key) {
+  return relayHex_(Utilities.computeHmacSha256Signature(Utilities.newBlob(String(text)).getBytes(), Utilities.newBlob(String(key)).getBytes()));
+}
+function relay_(body) {
+  const key = String(PropertiesService.getScriptProperties().getProperty('RELAY_KEY') || '');
+  if (key.length < 24) return { ok: false, error: 'The bridge to Cloudflare is not switched on here (RELAY_KEY in Script properties).' };
+  const text = String(body.relay || '');
+  if (!text || relaySig_(text, key) !== String(body.rsig || '')) { log_('Refused', ['relay', 'bad signature', '']); return { ok: false, error: 'The bridge signature is not right.' }; }
+  let r;
+  try { r = JSON.parse(text); } catch (e) { return { ok: false, error: 'The bridge request is not readable.' }; }
+  const at = Date.parse(r.at || '');
+  if (!isFinite(at) || Math.abs(Date.now() - at) > 600000) return { ok: false, error: 'The bridge request is too old (or the clock is wrong).' };
+  const cache = CacheService.getScriptCache();
+  const nk = 'relay:' + String(r.nonce || '');
+  if (!r.nonce || cache.get(nk)) return { ok: false, error: 'This bridge request was used already.' };
+  cache.put(nk, '1', 1200);
+  if (r.export) return relayExport_(r.export);
+  if (r.mail) {
+    const m = r.mail;
+    if (Array.isArray(m.attachments)) m.attachments = m.attachments.map(function (a) { return Utilities.newBlob(Utilities.base64Decode(String(a.base64 || '')), a.mime || 'application/octet-stream', a.name || 'file'); });
+    try { MailApp.sendEmail(m); return { ok: true }; } catch (e) { return { ok: false, error: String(e && e.message ? e.message : e) }; } }
+  const inner = r.inner || {};
+  if (RELAY_KINDS.indexOf(String(inner.kind || '')) < 0) return { ok: false, error: 'Not done through the bridge: ' + inner.kind };
+  const who = { ok: true, deviceId: String(r.deviceId || 'cloudflare'), admin: !!r.admin, viaRelay: true, viaKey: !!r.viaKey };
+  who.user = r.user && r.user.uid ? { uid: String(r.user.uid), role: String(r.user.role || ''), name: String(r.user.name || '') } : null;
+  // the copy of a change already accepted by the Cloudflare cloud: kept as it came (its device, its time)
+  if (inner.kind === 'push') return push_(inner.records || [], who.deviceId, who);
+  const out = route_(inner, who);
+  try { return JSON.parse(out.getContent ? out.getContent() : out.text); } catch (e) { return { ok: false, error: 'The answer could not be read.' }; }
+}
+// The data for the move: { what: 'list' } → every sheet of the data spreadsheet with its size; { what: 'sheet', name,
+// from, limit } → its rows (as text); { what: 'props' } → the script properties the cloud needs (never the bridge key,
+// the AI key or Google's own ids).
+function relayExport_(x) {
+  const ss = data_();
+  if (x.what === 'list') return { ok: true, version: SCRIPT_VERSION, sheets: ss.getSheets().map(function (sh) { return { name: sh.getName(), rows: sh.getLastRow(), cols: sh.getLastColumn() }; }) };
+  if (x.what === 'sheet') {
+    const sh = ss.getSheetByName(String(x.name || ''));
+    if (!sh) return { ok: false, error: 'No sheet ' + x.name };
+    const last = sh.getLastRow(); const cols = sh.getLastColumn();
+    const from = Math.max(1, Number(x.from) || 1); const n = Math.min(Math.max(1, Number(x.limit) || 2000), 5000);
+    const rows = from > last || !cols ? [] : sh.getRange(from, 1, Math.min(n, last - from + 1), cols).getValues().map(function (r) { return r.map(text_); });
+    return { ok: true, name: sh.getName(), from: from, rows: rows, last: last, more: from + rows.length <= last };
+  }
+  if (x.what === 'props') {
+    const p = PropertiesService.getScriptProperties();
+    const all = p.getProperties ? p.getProperties() : {};
+    const keep = {};
+    Object.keys(all).forEach(function (k) { if (['RELAY_KEY', 'GEMINI_KEY', 'GEMINI_MODEL', 'DATA_ID', 'LOG_ID', 'SNAPSHOT_FILE', 'SETUP_PACK_FILE_ID', 'VIBER_HOOK_URL'].indexOf(k) < 0 && !/^HIST_/.test(k)) keep[k] = all[k]; });
+    return { ok: true, props: keep };
+  }
+  return { ok: false, error: 'What should be exported?' };
 }
