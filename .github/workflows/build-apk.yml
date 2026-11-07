@@ -128,6 +128,25 @@ jobs:
               CI=1 npx expo prebuild --platform android --clean --no-install
             fi
           fi
+          # The document scanner (modules/doc-scanner: Google's scanner – finds the paper's edges, crops, corner adjust).
+          # If it does not build, the app is built without it (the camera then takes a plain photo with a crop box).
+          if [ -d modules/doc-scanner ]; then
+            (cd android && chmod +x gradlew && ./gradlew projects --no-daemon -q > /tmp/projects2.txt 2>&1) || true
+            DS=$(grep -o "':[^']*doc-scanner'" /tmp/projects2.txt | head -1 | tr -d "'")
+            if [ -z "$DS" ]; then
+              echo "::warning::The document scanner (modules/doc-scanner) was not linked into the app."
+              echo "DOCSCAN=not linked" >> "$GITHUB_ENV"
+            elif (cd android && ./gradlew "$DS:compileReleaseKotlin" --no-daemon -PreactNativeArchitectures=arm64-v8a > /tmp/docscan.log 2>&1); then
+              echo "Document scanner OK ($DS)."
+              echo "DOCSCAN=ok" >> "$GITHUB_ENV"
+            else
+              tail -60 /tmp/docscan.log
+              echo "::warning::The document scanner did not build – this app is built without it."
+              echo "DOCSCAN=left out" >> "$GITHUB_ENV"
+              rm -rf modules/doc-scanner
+              CI=1 npx expo prebuild --platform android --clean --no-install
+            fi
+          fi
           # Make sure the face engine is inside the app (copy it again if the build step missed it).
           if [ ! -s android/app/src/main/assets/face/model/face_recognition_model.bin ]; then
             echo "Face engine not packed by prebuild – copying it now"
@@ -184,7 +203,7 @@ jobs:
           echo "CODE=${CODE}" >> "$GITHUB_ENV"
           cd ..
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$NAME" "$NAME32" ${MAPS:+"$MAPNAME"} --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}. Signed with: ${SIGNED:-test} key. Why-it-closed reader: ${EXITINFO:-unknown}. (The .js.map file is for reading problem reports – do not install it.)"
+          gh release create latest "$NAME" "$NAME32" ${MAPS:+"$MAPNAME"} --title "Latest app – Easy Buys v${VERSION} (build ${CODE})" --notes "Open this page on the tablet or phone and tap the .apk to install (if Android says the app is not compatible, use the -32bit one instead). It updates the Bakery app in place and keeps all data. Face check: ${FACE:-unknown}. Signed with: ${SIGNED:-test} key. Why-it-closed reader: ${EXITINFO:-unknown}. Document scanner: ${DOCSCAN:-unknown}. (The .js.map file is for reading problem reports – do not install it.)"
 
       - name: Keep a copy for 30 days
         uses: actions/upload-artifact@v4
