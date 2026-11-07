@@ -1,0 +1,19 @@
+# Checks the Cloudflare token (secret CLOUDFLARE_API_TOKEN) works for the Easy Buys account. Runs on the cf-check branch.
+name: Check Cloudflare token
+on:
+  push:
+    branches: [cf-check]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Token and account
+        env:
+          CF: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACC: d06406ec1740e1ac63b8b8c02d500c1e
+        run: |
+          test -n "$CF" || { echo "::error::The secret CLOUDFLARE_API_TOKEN is not there"; exit 1; }
+          echo "== token"; curl -s -H "Authorization: Bearer $CF" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens/verify" | jq -c '{success, status: .result.status, errors}'
+          echo "== account"; curl -s -H "Authorization: Bearer $CF" "https://api.cloudflare.com/client/v4/accounts/$ACC" | jq -c '{success, name: .result.name, errors}'
+          echo "== workers (can it see them)"; curl -s -H "Authorization: Bearer $CF" "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts" | jq -c '{success, count: (.result|length), names: [.result[]?.id], errors}'
+          echo "== workers.dev subdomain"; curl -s -H "Authorization: Bearer $CF" "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/subdomain" | jq -c '{success, sub: .result.subdomain, errors}'
