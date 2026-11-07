@@ -1,0 +1,28 @@
+**********************
+PowerShell transcript start
+Start time: 20261107085345
+Username: runnervmm7ud1\runneradmin
+RunAs User: runnervmm7ud1\runneradmin
+Configuration Name: 
+Machine: runnervmm7ud1 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -command . 'D:\a\_temp\fc6ea964-c6f8-432f-b64b-3ab0cf08e1dd.ps1'
+Process ID: 4328
+PSVersion: 7.6.9
+PSEdition: Core
+GitCommitId: 7.6.9
+OS: Microsoft Windows 10.0.26100
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+Apps list: Easy Buys Aronium Link 1.0.24 by Easy Buys Shopping Centre
+
+update task: set up (runs as the system)
+ERROR: The system cannot find the file specified.
+
+update task: removed by the uninstall
+install, update and uninstall all fine
+PS>$global:?
+True
