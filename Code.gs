@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 21;                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
+const SCRIPT_VERSION = 22;                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
+// script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
 // script 19:                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
 // script 18:                // 1.0.0 build 10 (go-live, 2 Nov): sync under many phones – the write lock only around writes and short (busy → {busy, retryMs} at once instead of a hang), pulls read the rows in a few blocks instead of one by one, the devices list cached, a device's last-seen written at most every 2 minutes, refusals logged after the lock; job_lease (any device does the main-tablet jobs, one at a time); Viber posts once (once key).  1.0.0 build 9: Start fresh needs the owner's session (any device).  1.0.0 (owner, 2 Nov): readable photo names in Drive › Records › month › shop (Invoices / Cheques) and month (Deposits / Z reports / Payslips); tidy_records moves the old ones; payslip_save.  1.0.0 build 6: backups go up in resumable parts (backup_part / backup_done / backup_get_part).  1.0.0 build 5: "Get the End of day now" (link_pull_request; link_check / link_push answer pull: true to that shop's till PCs).  1.0.0 build 4: recharge machine wallets sync (recharge_sales, recharge_topups, recharge_setup).  1.0.0 build 1 (new app): devices sign every request with their pass (unknown / removed devices and wrong passes refused), PINs hashed (PIN_SALT) and never kept plain, role / PIN / locked-setting changes only from the owner's or admin's device, owner Viber channel for money alerts, setup_pack (the supplier set-up pack from Drive), clean_start (owner PIN checked here, cloud copy kept).  1.0.0 build 4: FCCC gas read by the cloud (fccc_lpg), bills read by AI (account and due date), Gemini model chain.  1.0.0: AI invoice reading (invoice_ai, GEMINI_KEY), page-by-page OCR, PDFs saved as PDFs, dashboard password lock.  v3.9.8: one Viber Channel per shop (each shop's alerts go to its own channel; the rest to the main one).  v3.9.5: Viber copies in Drive › Viber posts are binned after 30 days; Viber sets its own webhook. v3.7 / 1.0: documents (checked uploads, visibility, nightly backups, Windows file API); device control (pause, end date, remove, wipe, commands); v3.6: Start fresh
@@ -1552,7 +1553,7 @@ function onceIn_(key, secs) {
   try { const cache = CacheService.getScriptCache(); if (cache.get('once_' + key)) return true; cache.put('once_' + key, '1', secs); } catch (e) { /* no cache: not limited */ }
   return false;
 }
-const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin'];
+const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin', 'resend'];
 function deviceControl_(body, who) {
   return withLock_(function () {
     const id = String(body.id || '');
@@ -1576,6 +1577,13 @@ function deviceControl_(body, who) {
     else if (a === 'end') { const e = String(body.endDate || ''); if (e && !/^\d{4}-\d{2}-\d{2}$/.test(e)) return { ok: false, error: 'Choose the last day.' }; c.endDate = e || null; hist_(c, e ? 'Access ends after ' + e : 'No end date', by); }
     else if (a === 'wipe') { c.wipe = 'pending'; hist_(c, 'Wipe asked (on its next contact)', by); }
     else if (a === 'admin') { c.admin = !!body.on; hist_(c, c.admin ? 'Marked as an admin device (roles, PINs and locked settings may be changed on it)' : 'No longer an admin device', by); }
+    else if (a === 'resend') {
+      // script 22 (owner, 7 Nov, after the refused Shop 2 sales lines): the device sends what it changed in the last
+      // days once more (harmless twice – the cloud keeps the newest). Build 16 or newer understands it.
+      const days = Math.min(14, Math.max(1, Math.round(Number(body.days) || 3)));
+      c.cmds = (c.cmds || []).concat([{ kind: 'resend', days: days, at: now_(), by: String(body.by || '') }]).slice(-10);
+      hist_(c, 'Asked to send its records of the last ' + days + ' day(s) again', by);
+    }
     else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
     ctlSave_(all);
     if (['block', 'allow', 'remove', 'rename'].indexOf(a) >= 0) devicesChanged_();
