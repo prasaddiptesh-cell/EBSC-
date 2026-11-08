@@ -41,10 +41,24 @@ jobs:
           CLOUD_IMPL=cf node tests/cloud.test.js | tail -1
           CLOUD_IMPL=cf node tests/cloud19.test.js | tail -1
           CLOUD_IMPL=cf node tests/cloud21.test.js | tail -1
+      - name: The workers.dev address (made once)
+        run: |
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain"
+          SUB=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api" | jq -r '.result.subdomain // empty')
+          if [ -z "$SUB" ]; then
+            for name in easybuys easybuys-fiji easybuys-cloud-fj; do
+              r=$(curl -s -X PUT -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "{\"subdomain\":\"$name\"}" "$api")
+              echo "$r" | jq -c '{success, errors}'
+              if [ "$(echo "$r" | jq -r .success)" = "true" ]; then SUB=$name; break; fi
+            done
+          fi
+          test -n "$SUB" || { echo "::error::No workers.dev address – open Workers & Pages once in the Cloudflare dashboard"; exit 1; }
+          echo "Address: $SUB.workers.dev"
       - name: Deploy
         if: contains(env.ACTIONS, 'deploy')
         working-directory: app/cloudflare
         run: |
+          set -o pipefail
           npx --yes wrangler@4 deploy 2>&1 | grep -v -i "token" | tail -25
       - name: Keys
         working-directory: app/cloudflare
@@ -59,6 +73,7 @@ jobs:
             require('fs').writeFileSync('/tmp/secrets.json', JSON.stringify(o));
             console.log('Keys set:', Object.keys(o).join(', '));
           " 
+          set -o pipefail
           npx --yes wrangler@4 secret bulk /tmp/secrets.json 2>&1 | grep -v -i "token" | tail -5
           rm -f /tmp/secrets.json
       - name: The address
@@ -68,8 +83,9 @@ jobs:
           URL="https://easybuys-cloud.$SUB.workers.dev"
           echo "URL=$URL" >> "$GITHUB_ENV"
           echo "The Easy Buys cloud on Cloudflare: $URL" | tee -a "$GITHUB_STEP_SUMMARY"
-          sleep 5
-          curl -s "$URL/health"; echo
+          # a new address takes a few minutes to work everywhere
+          for i in $(seq 1 30); do H=$(curl -s -m 10 "$URL/health" || true); if echo "$H" | grep -q '"ok":true'; then break; fi; sleep 10; done
+          echo "health: ${H:-no answer yet}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Status / import / send
         run: |
           ask() { curl -s -m 900 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"$1\",\"adminKey\":\"$ADMIN_KEY\"}" "$URL"; }
