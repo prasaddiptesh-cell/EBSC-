@@ -25,7 +25,8 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 22;                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
+const SCRIPT_VERSION = 23;                // 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+// script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
 // script 19:                // 1.0.0 build 13 (6 Nov): a new phone may be allowed as an owner / admin phone; users_all (a phone whose access changed gets every login again); pull says the access (admin|shop)
@@ -115,6 +116,8 @@ function doPost(e) {
     if (body.kind === 'main_files' || body.kind === 'main_file_get') return json_(mainFiles_(body)); // v3.5 Windows software: full file mirror
     // --- 1.0.0 build 1: a till PC's own key (its Aronium records and its link check only) ---
     if (body.kind === 'link_push' || body.kind === 'link_check') return json_(linkApi_(body));
+    // --- 1.0.0 build 16 (script 21): the Easy Buys cloud on Cloudflare asking for what only Google does (see relay_) ---
+    if (body.kind === 'relay') return json_(relay_(body));
     // --- a new device joining with an invite (no key yet) ---
     if (body.kind === 'join') return json_(join_(body));
     // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
@@ -127,12 +130,24 @@ function doPost(e) {
     // 1.0.0 build 1 (script 12): PINs in the cloud copy are hashed once (and every PIN that arrives is hashed).
     try { migratePins_(); } catch (x) { /* tried again on the next request */ }
     who.user = sessionUser_(body, who);
+    REQ_.who = who; // 1.0.0 build 16: the Cloudflare cloud copies an accepted change to Google as this device
+    return route_(body, who);
+  } catch (err) {
+    // 1.0.0 build 10: the write lock was not free within a few seconds – answer at once (the app tries again in a moment)
+    // instead of hanging until the app gives up ("Aborted").
+    if (err && err.busy) return json_(busyReply_());
+    return json_({ ok: false, error: String(err && err.message ? err.message : err) });
+  } finally { flushLater_(); }
+}
+// 1.0.0 build 16 (script 21): everything after the device is known, in its own function – the Cloudflare cloud's
+// bridge (relay_) runs the Google-only requests (Drive, email, the AI readers …) through the same code.
+function route_(body, who) {
     if (body.kind === 'user_login') return json_(userLogin_(body, who));
     if (body.kind === 'link_pull_request') return json_(linkPullRequest_(body, who));
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
     if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who, Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
       // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
-      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.user = who.user ? who.user.role : null; return json_(out); }
+      if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.deviceRole = roleOf_(who) || null; out.user = who.user ? who.user.role : null; return json_(out); }
     if (body.kind === 'invite_create') return json_(needOwner_(who, body, 'Adding a device') || inviteCreate_(body, who));
     if (body.kind === 'invite_cancel') return json_(needOwner_(who, body, 'Cancelling an invite') || inviteCancel_(body, who));
     if (body.kind === 'devices') return json_({ ok: true, devices: devices_() });
@@ -448,12 +463,6 @@ function doPost(e) {
       default:
         return json_({ ok: false, error: 'Unknown request: ' + body.kind });
     }
-  } catch (err) {
-    // 1.0.0 build 10: the write lock was not free within a few seconds – answer at once (the app tries again in a moment)
-    // instead of hanging until the app gives up ("Aborted").
-    if (err && err.busy) return json_(busyReply_());
-    return json_({ ok: false, error: String(err && err.message ? err.message : err) });
-  } finally { flushLater_(); }
 }
 function busyReply_() { return { ok: false, busy: true, retryMs: 1500 + Math.floor(Math.random() * 2500), error: 'The cloud is busy – trying again.' }; }
 
@@ -803,7 +812,17 @@ function data_() {
   const props = PropertiesService.getScriptProperties();
   const id = props.getProperty('DATA_ID');
   if (id && REQ_.ss && REQ_.ssId === id) return REQ_.ss;
-  if (id) { try { const ss0 = SpreadsheetApp.openById(id); REQ_.ss = ss0; REQ_.ssId = id; return ss0; } catch (e) { /* deleted: make a new one */ } }
+  // script 23 (8 Nov): Google could not open the data spreadsheet for a moment, and a NEW empty one was made – every
+  // device was then "not known". Now the cloud tries a few times and otherwise answers "try again"; a new spreadsheet
+  // is made only on the very first run (no DATA_ID yet) – never in place of the real one.
+  if (id) {
+    let err = null;
+    for (let i = 0; i < 3; i++) {
+      try { const ss0 = SpreadsheetApp.openById(id); REQ_.ss = ss0; REQ_.ssId = id; return ss0; } catch (e) { err = e; try { Utilities.sleep(400 * (i + 1)); } catch (e2) { /* no wait */ } }
+    }
+    log_('Data', ['The data spreadsheet could not be opened', String(err && err.message || err).slice(0, 200)]);
+    throw new Error('The cloud could not open its data just now. Nothing was changed – it tries again by itself in a minute.');
+  }
   const ss = SpreadsheetApp.create(DATA_NAME);
   try { DriveApp.getFileById(ss.getId()).moveTo(root_()); } catch (e) { /* stays in My Drive */ }
   props.setProperty('DATA_ID', ss.getId());
@@ -1107,10 +1126,12 @@ function pull_(since, deviceId, forMain, who, limit) {
   const list = changes.getRange(start, 1, count, CHANGES_HEADER.length).getValues().map(function (r) { return r.map(text_); });
   const want = [];
   const seen = {};
+  const hidden = forMain ? {} : hiddenFor_(who);
   list.forEach(function (c, i) {
     const table = String(c[1]);
     if (!forMain && String(c[4]) === String(deviceId)) return;
     if (!forMain && table === 'audit_log' && !who.admin) return;
+    if (!forMain && hidden[table]) return; // 1.0.0 build 16: not for this device's role (DEVICE_ROLES)
     const id = table + '|' + c[2];
     if (seen[id]) return;
     seen[id] = true;
@@ -1145,7 +1166,8 @@ function pull_(since, deviceId, forMain, who, limit) {
 // for every login again (users_all) – the PINs it may now have come at once, not only with each person's next change.
 function access_(who) {
   if (!who || who.forMain) return 'main';
-  return (who.admin ? 'A' : 'S') + '|' + String((ctlAll_()[who.deviceId] || {}).shop || '');
+  const c = ctlAll_()[who.deviceId] || {};
+  return (who.admin ? 'A' : 'S') + '|' + String(c.shop || '') + (c.role ? '|' + c.role : '');
 }
 function usersAll_(who) {
   const sh = data_().getSheetByName('T_users');
@@ -1191,7 +1213,7 @@ function devices_() {
   return deviceRows_().map(function (r) {
     const c = all[String(r[0])] || {};
     return { id: r[0], name: r[1], kind: r[2], status: r[3], first_seen: r[5], last_seen: r[6], app: r[7], invited_by: r[8],
-      until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
+      until: c.until || null, endDate: c.endDate || null, shop: c.shop || null, role: c.role || null, roles: c.roles || [], stat: c.stat || null, hist: c.hist || [],
       attempts: c.attempts || [], waitingCmds: (c.cmds || []).length, wipe: c.wipe || null, lastLog: c.lastLog || null,
       admin: isAdminDevice_(String(r[0]), /cloud key/.test(String(r[9] || ''))), adminMarked: !!c.admin, signs: c.signs || null };
   });
@@ -1331,6 +1353,15 @@ function inviteCreate_(body, who) {
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'That email address does not look right.' };
   const url = String(body.url || '');
   sheet_('Invites', INVITE_HEADER).appendRow([code, created.toISOString(), expires.toISOString(), esc_((body.by || '') + ' @ ' + who.deviceId), email, '', '', uses, 0, '']);
+  // 1.0.0 build 16: an invite with the device's role (and shop) – the owner made it, so the device is allowed at once.
+  const role = DEVICE_ROLES[String(body.role || '')] ? String(body.role) : '';
+  if (role) {
+    const p = props_(); let m = {}; try { m = JSON.parse(p.getProperty('INVITE_ROLE') || '{}') || {}; } catch (e) { m = {}; }
+    const keep = {}; Object.keys(m).slice(-30).forEach(function (k) { keep[k] = m[k]; });
+    keep[code] = { role: role, shop: String(body.shop || '').slice(0, 10), by: who && who.user ? who.user.name : '' };
+    p.setProperty('INVITE_ROLE', JSON.stringify(keep));
+    if (role === 'owner') body.adminDevice = true;
+  }
   // 1.0.0 build 1: an invite for the owner's / an admin's own phone makes it an admin device when it joins.
   if (body.adminDevice) { const p = props_(); let l = []; try { l = JSON.parse(p.getProperty('INVITE_ADMIN') || '[]'); } catch (e) { l = []; } p.setProperty('INVITE_ADMIN', JSON.stringify(l.concat([code]).slice(-20))); }
   const link = linkCode_(url, code);
@@ -1410,7 +1441,10 @@ function join_(body) {
     if (inv[9]) return { ok: false, error: 'The owner cancelled this invite. Ask for a new QR code.' };
     if (usedN >= uses) return { ok: false, error: uses > 1 ? 'This QR code has been used by ' + uses + ' phones already. Ask for a new one.' : 'This invite has already been used. Ask for a new one.' };
     if (new Date(inv[2]).getTime() < Date.now()) return { ok: false, error: 'This invite has expired. Ask for a new one.' };
-    const approval = PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
+    let invRole = null;
+    try { invRole = (JSON.parse(props_().getProperty('INVITE_ROLE') || '{}') || {})[code] || null; } catch (e) { invRole = null; }
+    // 1.0.0 build 16: an invite made with a role by the owner / an admin is their OK already
+    const approval = !invRole && PropertiesService.getScriptProperties().getProperty('REQUIRE_APPROVAL') !== '0';
     if (existing && String(existing.v[3]) !== 'removed' && String(existing.v[4] || '')) { log_('Refused', [String(d.id), 'join with a device id already linked']); return { ok: false, error: 'A device with this id is already linked. Remove the old one first (Admin › Devices).' }; }
     if (existing) { existing.sh.getRange(existing.row, 4, 1, 2).setValues([[approval ? 'waiting' : 'active', sha_(token)]]); devicesChanged_(); }
     else touchDevice_(body, String(d.id), { status: approval ? 'waiting' : 'active', tokenHash: sha_(token), invitedBy: inv[3], note: 'invite ' + code });
@@ -1421,15 +1455,16 @@ function join_(body) {
     try { adminList = JSON.parse(props_().getProperty('INVITE_ADMIN') || '[]'); } catch (e) { adminList = []; }
     // one save for the device's control note (never stops the join: the device is linked already)
     const all0 = ctlAll_();
-    if (adminList.indexOf(code) >= 0 || nonceH || (all0[String(d.id)] && all0[String(d.id)].removedAt)) {
+    if (invRole || adminList.indexOf(code) >= 0 || nonceH || (all0[String(d.id)] && all0[String(d.id)].removedAt)) {
       const all = all0; const c = ctl_(all, String(d.id));
       delete c.removedAt;
       if (adminList.indexOf(code) >= 0) { c.admin = true; hist_(c, 'Joined as an admin device (owner\'s invite)', inv[3]); }
+      if (invRole) { c.role = invRole.role; if (invRole.shop) c.shop = invRole.shop; hist_(c, 'Joined as ' + DEVICE_ROLES[invRole.role].label + (invRole.shop ? ' (' + invRole.shop + ')' : ''), invRole.by || inv[3]); }
       if (nonceH) { c.joinNonce = nonceH; c.joinCode = code; c.joinAt = Date.now(); }
       ctlSaveSafe_(all);
     }
     secEvent_('device', { device: String(d.name || d.id), what: 'A new device joined with an invite' + (approval ? ' – it waits for your approval' : '') + (adminList.indexOf(code) >= 0 ? ' (as an admin device)' : ''), refused: false });
-    return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0 };
+    return { ok: true, token: token, approved: !approval, admin: adminList.indexOf(code) >= 0, role: invRole ? invRole.role : null };
   } finally { lock.releaseLock(); REQ_.locked -= 1; }
 }
 
@@ -1542,7 +1577,7 @@ function devicePulled_(id, body, out) {
   if (body.stat && ((Math.abs(Number(body.stat.clockSkewMin) || 0) > 5) || (body.stat.tz && !/Fiji|^\+1[23]|^UTC\+12/.test(String(body.stat.tz)))) && !onceIn_('clock_' + id, 3600)) {
     secEvent_('clock', { device: String(c.name || id), what: 'Clock ' + (Number(body.stat.clockSkewMin) || 0) + ' minutes from Google\'s time; time zone ' + String(body.stat.tz || 'not said'), refused: false });
   }
-  out.control = { shop: c.shop || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
+  out.control = { shop: c.shop || null, role: c.role || null, roles: c.roles || [], name: c.name || null, endDate: c.endDate || null };
   out.commands = c.cmds || [];
   c.cmds = [];
   // 1.0.0 build 10 (review): a pull never fails because the device-control note could not be saved
@@ -1553,7 +1588,7 @@ function onceIn_(key, secs) {
   try { const cache = CacheService.getScriptCache(); if (cache.get('once_' + key)) return true; cache.put('once_' + key, '1', secs); } catch (e) { /* no cache: not limited */ }
   return false;
 }
-const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin', 'resend'];
+const DEVICE_ACTIONS = ['suspend', 'block', 'allow', 'remove', 'rename', 'shop', 'roles', 'end', 'sync', 'log', 'signout', 'wipe', 'admin', 'resend', 'role'];
 function deviceControl_(body, who) {
   return withLock_(function () {
     const id = String(body.id || '');
@@ -1576,6 +1611,14 @@ function deviceControl_(body, who) {
     else if (a === 'roles') { c.roles = (body.roles || []).map(String); hist_(c, c.roles.length ? 'Only these roles may log in: ' + c.roles.join(', ') : 'Every role may log in', by); }
     else if (a === 'end') { const e = String(body.endDate || ''); if (e && !/^\d{4}-\d{2}-\d{2}$/.test(e)) return { ok: false, error: 'Choose the last day.' }; c.endDate = e || null; hist_(c, e ? 'Access ends after ' + e : 'No end date', by); }
     else if (a === 'wipe') { c.wipe = 'pending'; hist_(c, 'Wipe asked (on its next contact)', by); }
+    else if (a === 'role') {
+      // 1.0.0 build 16: the device's role (what it is sent); the owner's role makes it an admin device too
+      const r = String(body.role || '');
+      if (r && !DEVICE_ROLES[r]) return { ok: false, error: 'Choose the role.' };
+      if (r) c.role = r; else delete c.role;
+      if (r === 'owner') c.admin = true; else if (r) c.admin = false;
+      hist_(c, r ? 'Role: ' + DEVICE_ROLES[r].label : 'No role (gets everything)', by);
+    }
     else if (a === 'admin') { c.admin = !!body.on; hist_(c, c.admin ? 'Marked as an admin device (roles, PINs and locked settings may be changed on it)' : 'No longer an admin device', by); }
     else if (a === 'resend') {
       // script 22 (owner, 7 Nov, after the refused Shop 2 sales lines): the device sends what it changed in the last
@@ -1587,7 +1630,7 @@ function deviceControl_(body, who) {
     else { c.cmds = (c.cmds || []).concat([{ kind: a, at: now_(), by: String(body.by || '') }]).slice(-10); hist_(c, { sync: 'Asked to sync now', log: 'Asked for its problem log', signout: 'Asked to sign everyone out' }[a], by); }
     ctlSave_(all);
     if (['block', 'allow', 'remove', 'rename'].indexOf(a) >= 0) devicesChanged_();
-    if (['wipe', 'remove', 'block', 'allow', 'admin'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
+    if (['wipe', 'remove', 'block', 'allow', 'admin', 'role'].indexOf(a) >= 0) secEvent_('device', { device: String(d.v[1] || id), person: who.user ? who.user.name : by, what: { role: 'Role changed: ' + (DEVICE_ROLES[String(body.role || '')] ? DEVICE_ROLES[String(body.role)].label : 'none'), wipe: 'Device to be wiped', remove: 'Device removed', block: 'Device blocked', allow: 'Device allowed again', admin: body.on ? 'Marked as an admin device' : 'No longer an admin device' }[a] + ' (by ' + by + ')', refused: false });
     return { ok: true, devices: devices_() };
   });
 }
@@ -3295,6 +3338,11 @@ function jobLease_(body, who) {
       }
       // the backup and the accountant pack: an admin device only (being the main device is not enough – they need the
       // whole data). Not asked again for the job's time (staff phones used to ask under the write lock on every sync).
+      // 1.0.0 build 16: a shop / bakery device has only part of the data – it never takes a shared job
+      if (DEVICE_ROLES[roleOf_(who)] && DEVICE_ROLES[roleOf_(who)].noJobs) {
+        out[job] = { granted: false, holder: live ? cur.holder : '', holderName: live ? cur.name : '', until: new Date(now + 3600000).toISOString(), untilMs: now + 3600000, mark: markOf(), why: 'role' };
+        return;
+      }
       if (LEASE_ADMIN_JOBS.indexOf(job) >= 0 && !who.admin) {
         out[job] = { granted: false, holder: live ? cur.holder : '', holderName: live ? cur.name : '', until: new Date(now + ttl * 1000).toISOString(), untilMs: now + ttl * 1000, mark: markOf(), why: 'admin device only' };
         return;
@@ -3793,4 +3841,114 @@ function histRoute_(body, who) {
     case 'hist_reopen': return histClose_(body, who, true);
     default: return { ok: false, error: 'Unknown request: ' + body.kind };
   }
+}
+
+
+// ================================================================ 1.0.0 build 16 (script 21): the bridge to Cloudflare
+// Owner, 7 Nov: "fast sync … we transfer to Cloudflare". The phones and tablets sync with the Easy Buys cloud on
+// Cloudflare (the same code, in memory: much faster). What only Google can do stays here and the Cloudflare cloud asks
+// for it on the device's behalf: photos and files in Drive, emails, the AI invoice / bill readers, Viber, the calendar,
+// backups, the invoices from before the app, the online dashboard – and a copy of every change it accepts, so this
+// spreadsheet stays a full backup. Each request is signed with RELAY_KEY (Project settings › Script properties – the
+// same secret as in Cloudflare); none is accepted twice or after 10 minutes. relay_export gives the data once, for the
+// move. Without RELAY_KEY nothing here works.
+const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'pack_email',
+  'support_email', 'viber', 'viber_setup', 'myday_events', 'myday_out', 'calendar', 'fccc_lpg', 'setup_pack', 'tidy_records', 'snapshot',
+  'backup', 'backup_part', 'backup_done', 'backup_list', 'backup_get', 'backup_get_part', 'problem_log', 'problem_log_get',
+  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen'];
+// The Cloudflare cloud checks the device and its login here before asking Google for a Google-only request.
+function authOnly_(body) {
+  REQ_ = {};
+  try {
+    const who = auth_(body);
+    if (who.ok) who.user = sessionUser_(body, who);
+    return who;
+  } finally { flushLater_(); }
+}
+function relayHex_(bytes) { return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join(''); }
+function relaySig_(text, key) {
+  return relayHex_(Utilities.computeHmacSha256Signature(Utilities.newBlob(String(text)).getBytes(), Utilities.newBlob(String(key)).getBytes()));
+}
+function relay_(body) {
+  const key = String(PropertiesService.getScriptProperties().getProperty('RELAY_KEY') || '');
+  if (key.length < 24) return { ok: false, error: 'The bridge to Cloudflare is not switched on here (RELAY_KEY in Script properties).' };
+  const text = String(body.relay || '');
+  if (!text || relaySig_(text, key) !== String(body.rsig || '')) { log_('Refused', ['relay', 'bad signature', '']); return { ok: false, error: 'The bridge signature is not right.' }; }
+  let r;
+  try { r = JSON.parse(text); } catch (e) { return { ok: false, error: 'The bridge request is not readable.' }; }
+  const at = Date.parse(r.at || '');
+  if (!isFinite(at) || Math.abs(Date.now() - at) > 600000) return { ok: false, error: 'The bridge request is too old (or the clock is wrong).' };
+  const cache = CacheService.getScriptCache();
+  const nk = 'relay:' + String(r.nonce || '');
+  if (!r.nonce || cache.get(nk)) return { ok: false, error: 'This bridge request was used already.' };
+  cache.put(nk, '1', 1200);
+  if (r.export) return relayExport_(r.export);
+  if (r.mail) {
+    const m = r.mail;
+    if (Array.isArray(m.attachments)) m.attachments = m.attachments.map(function (a) { return Utilities.newBlob(Utilities.base64Decode(String(a.base64 || '')), a.mime || 'application/octet-stream', a.name || 'file'); });
+    try { MailApp.sendEmail(m); return { ok: true }; } catch (e) { return { ok: false, error: String(e && e.message ? e.message : e) }; } }
+  const inner = r.inner || {};
+  if (RELAY_KINDS.indexOf(String(inner.kind || '')) < 0) return { ok: false, error: 'Not done through the bridge: ' + inner.kind };
+  // script 23: the device's signature was checked by the Cloudflare cloud – the request counts as signed here too (an
+  // unsigned request from an admin device is only allowed for old apps during the change-over, transition_)
+  if (r.signed) inner.sig = 'checked-by-cloudflare';
+  const who = { ok: true, deviceId: String(r.deviceId || 'cloudflare'), admin: !!r.admin, viaRelay: true, viaKey: !!r.viaKey };
+  who.user = r.user && r.user.uid ? { uid: String(r.user.uid), role: String(r.user.role || ''), name: String(r.user.name || '') } : null;
+  // the copy of a change already accepted by the Cloudflare cloud: kept as it came (its device, its time)
+  if (inner.kind === 'push') return push_(inner.records || [], who.deviceId, who);
+  const out = route_(inner, who);
+  try { return JSON.parse(out.getContent ? out.getContent() : out.text); } catch (e) { return { ok: false, error: 'The answer could not be read.' }; }
+}
+// The data for the move: { what: 'list' } → every sheet of the data spreadsheet with its size; { what: 'sheet', name,
+// from, limit } → its rows (as text); { what: 'props' } → the script properties the cloud needs (never the bridge key,
+// the AI key or Google's own ids).
+function relayExport_(x) {
+  const ss = data_();
+  if (x.what === 'list') return { ok: true, version: SCRIPT_VERSION, sheets: ss.getSheets().map(function (sh) { return { name: sh.getName(), rows: sh.getLastRow(), cols: sh.getLastColumn() }; }) };
+  if (x.what === 'sheet') {
+    const sh = ss.getSheetByName(String(x.name || ''));
+    if (!sh) return { ok: false, error: 'No sheet ' + x.name };
+    const last = sh.getLastRow(); const cols = sh.getLastColumn();
+    const from = Math.max(1, Number(x.from) || 1); const n = Math.min(Math.max(1, Number(x.limit) || 2000), 5000);
+    const rows = from > last || !cols ? [] : sh.getRange(from, 1, Math.min(n, last - from + 1), cols).getValues().map(function (r) { return r.map(text_); });
+    return { ok: true, name: sh.getName(), from: from, rows: rows, last: last, more: from + rows.length <= last };
+  }
+  if (x.what === 'props') {
+    const p = PropertiesService.getScriptProperties();
+    const all = p.getProperties ? p.getProperties() : {};
+    const keep = {};
+    Object.keys(all).forEach(function (k) { if (['RELAY_KEY', 'GEMINI_KEY', 'GEMINI_MODEL', 'DATA_ID', 'LOG_ID', 'SNAPSHOT_FILE', 'SETUP_PACK_FILE_ID', 'VIBER_HOOK_URL'].indexOf(k) < 0 && !/^HIST_/.test(k)) keep[k] = all[k]; });
+    return { ok: true, props: keep };
+  }
+  return { ok: false, error: 'What should be exported?' };
+}
+
+
+// ================================================================ 1.0.0 build 16: the device's role
+// Owner, 7 Nov: "the hassle of getting a new device hooked on … sync dependent on the role I give while giving access".
+// The role is chosen when the owner makes the QR code (and can be changed in Devices). Each pull leaves out what the
+// role must not have; a shop or bakery device never takes a shared job (they need the whole data). A device without a
+// role (linked before build 16) gets everything, as before.
+const PAYROLL_TABLES = ['pay_profiles', 'staff_debts', 'staff_charges', 'pay_runs', 'pay_lines', 'stat_payments', 'pay_signoffs', 'pay_slip_status', 'tax_proofs', 'tax_returns', 'tax_return_versions'];
+const BOOKS_TABLES = ['gl_accounts', 'gl_journals', 'fixed_assets', 'gl_budgets', 'aronium_batches', 'gl_recurring', 'gl_year_close', 'accountant_queries'];
+const OWNER_TABLES = ['owner_moves', 'personal_regulars', 'myday_items', 'myday_marks'];
+const OFFICE_TABLES = ['bank_entries', 'bank_statements', 'bank_lines', 'bank_checks', 'bank_closings', 'wallet_imports', 'wallet_lines', 'loan_entries', 'regular_terms', 'regular_receipts',
+  'loan_statements', 'loan_recons', 'supplier_statements', 'job_openings', 'applicants', 'onboarding', 'signatures', 'contracts', 'documents', 'issued_docs', 'staff_details',
+  'staff_credit_imports', 'staff_credit_balances', 'credit_settlements', 'bin_records', 'bin_parts'];
+const DEVICE_ROLES = {
+  owner: { label: 'the owner\'s / an admin\'s device', hide: [] },
+  manager: { label: 'a manager / office device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES) },
+  staff: { label: 'a shop / staff device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES, OFFICE_TABLES), noJobs: true },
+  bakery: { label: 'the bakery device', hide: PAYROLL_TABLES.concat(BOOKS_TABLES, OWNER_TABLES, OFFICE_TABLES), noJobs: true },
+};
+function roleOf_(who) {
+  if (!who || who.forMain || who.viaKey) return '';
+  const r = String((ctlAll_()[String(who.deviceId)] || {}).role || '');
+  return DEVICE_ROLES[r] ? r : '';
+}
+function hiddenFor_(who) {
+  const r = DEVICE_ROLES[roleOf_(who)];
+  const out = {};
+  if (r && !(who && who.admin)) r.hide.forEach(function (t) { out[t] = true; });
+  return out;
 }

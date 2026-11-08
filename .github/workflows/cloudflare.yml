@@ -1,0 +1,82 @@
+# The Easy Buys cloud on Cloudflare (Easy Buys' own account – never Vukavata's).
+# Runs when the branch "cf-ops" is pushed (or by hand). The file cf-ops.txt on that branch says what to do, one per line:
+#   deploy  – build the cloud program from cloud/Code.gs (inside EasyBuys.zip) and put it on Cloudflare
+#   status  – what the Cloudflare cloud holds (sheets and rows, copies waiting for Google)
+#   import  – copy the data from the Google cloud (every sheet and the script properties) – before the switch only
+#   send    – send the copies waiting for Google now
+# GitHub secrets: CLOUDFLARE_API_TOKEN, RELAY_KEY (also in the Google script's properties), GOOGLE_URL (…/exec).
+# ADMIN_KEY is made new on every run, so nobody has to keep it. Nothing secret is printed (this repository is public).
+name: Easy Buys cloud on Cloudflare
+on:
+  push:
+    branches: [cf-ops]
+  workflow_dispatch:
+jobs:
+  cloud:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: d06406ec1740e1ac63b8b8c02d500c1e
+      RELAY_KEY: ${{ secrets.RELAY_KEY }}
+      GOOGLE_URL: ${{ secrets.GOOGLE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The app source (EasyBuys.zip)
+        run: |
+          mkdir -p app && cd app && unzip -q ../EasyBuys.zip
+          test -f cloudflare/wrangler.toml || { echo "::error::No cloudflare/ in EasyBuys.zip"; exit 1; }
+          ACTIONS=$(tr -d '\r' < ../cf-ops.txt 2>/dev/null | grep -E '^[a-z]+' | tr '\n' ' ')
+          echo "ACTIONS=${ACTIONS:-deploy status}" >> "$GITHUB_ENV"
+          echo "To do: ${ACTIONS:-deploy status}"
+      - name: Checks before anything goes up
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::The secret CLOUDFLARE_API_TOKEN is missing"; exit 1; }
+          if [ ${#RELAY_KEY} -lt 24 ]; then echo "::warning::RELAY_KEY is missing or short – the bridge to Google stays off"; fi
+          test -n "$GOOGLE_URL" || echo "::warning::GOOGLE_URL is missing – the bridge to Google stays off"
+          cd app && node cloudflare/tools/build-cloud.mjs
+          # the cloud program must be the one that was tested: the Cloudflare tests in Node
+          CLOUD_IMPL=cf node tests/cloud.test.js | tail -1
+          CLOUD_IMPL=cf node tests/cloud19.test.js | tail -1
+          CLOUD_IMPL=cf node tests/cloud21.test.js | tail -1
+      - name: Deploy
+        if: contains(env.ACTIONS, 'deploy')
+        working-directory: app/cloudflare
+        run: |
+          npx --yes wrangler@4 deploy 2>&1 | grep -v -i "token" | tail -25
+      - name: Keys
+        working-directory: app/cloudflare
+        run: |
+          ADMIN_KEY=$(node -e "console.log(require('crypto').randomBytes(24).toString('hex'))")
+          echo "::add-mask::$ADMIN_KEY"
+          echo "ADMIN_KEY=$ADMIN_KEY" >> "$GITHUB_ENV"
+          ADMIN_KEY_NEW=$ADMIN_KEY node -e "
+            const o = { ADMIN_KEY: process.env.ADMIN_KEY_NEW };
+            if ((process.env.RELAY_KEY || '').length >= 24) o.RELAY_KEY = process.env.RELAY_KEY;
+            if (process.env.GOOGLE_URL) o.GOOGLE_URL = process.env.GOOGLE_URL;
+            require('fs').writeFileSync('/tmp/secrets.json', JSON.stringify(o));
+            console.log('Keys set:', Object.keys(o).join(', '));
+          " 
+          npx --yes wrangler@4 secret bulk /tmp/secrets.json 2>&1 | grep -v -i "token" | tail -5
+          rm -f /tmp/secrets.json
+      - name: The address
+        run: |
+          SUB=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain // empty')
+          test -n "$SUB" || { echo "::error::No workers.dev address yet – open Workers & Pages once in the Cloudflare dashboard"; exit 1; }
+          URL="https://easybuys-cloud.$SUB.workers.dev"
+          echo "URL=$URL" >> "$GITHUB_ENV"
+          echo "The Easy Buys cloud on Cloudflare: $URL" | tee -a "$GITHUB_STEP_SUMMARY"
+          sleep 5
+          curl -s "$URL/health"; echo
+      - name: Status / import / send
+        run: |
+          ask() { curl -s -m 900 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"$1\",\"adminKey\":\"$ADMIN_KEY\"}" "$URL"; }
+          for a in $ACTIONS; do
+            case "$a" in
+              import) echo "== import"; ask cf_import | jq -c '{ok, error, props, scriptVersion, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
+              send) echo "== send"; ask cf_send | jq -c . ;;
+              status) echo "== status"; ask cf_status | jq -c '{ok, error, version, waitingForGoogle, imported, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
+            esac
+          done
