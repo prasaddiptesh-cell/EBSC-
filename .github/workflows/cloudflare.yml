@@ -4,6 +4,7 @@
 #   status  – what the Cloudflare cloud holds (sheets and rows, copies waiting for Google)
 #   import  – copy the data from the Google cloud (every sheet and the script properties) – before the switch only
 #   send    – send the copies waiting for Google now
+#   tenants – the list of businesses on the cloud (plan and licence only)
 # GitHub secrets: CLOUDFLARE_API_TOKEN, RELAY_KEY (also in the Google script's properties), GOOGLE_URL (…/exec).
 # ADMIN_KEY is made new on every run, so nobody has to keep it. Nothing secret is printed (this repository is public).
 name: Easy Buys cloud on Cloudflare
@@ -41,6 +42,7 @@ jobs:
           CLOUD_IMPL=cf node tests/cloud.test.js | tail -1
           CLOUD_IMPL=cf node tests/cloud19.test.js | tail -1
           CLOUD_IMPL=cf node tests/cloud21.test.js | tail -1
+          node tests/tenants.test.js | tail -1
       - name: The workers.dev address (made once)
         run: |
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain"
@@ -66,8 +68,11 @@ jobs:
           ADMIN_KEY=$(node -e "console.log(require('crypto').randomBytes(24).toString('hex'))")
           echo "::add-mask::$ADMIN_KEY"
           echo "ADMIN_KEY=$ADMIN_KEY" >> "$GITHUB_ENV"
-          ADMIN_KEY_NEW=$ADMIN_KEY node -e "
-            const o = { ADMIN_KEY: process.env.ADMIN_KEY_NEW };
+          PROVIDER_KEY=$(node -e "console.log(require('crypto').randomBytes(24).toString('hex'))")
+          echo "::add-mask::$PROVIDER_KEY"
+          echo "PROVIDER_KEY=$PROVIDER_KEY" >> "$GITHUB_ENV"
+          ADMIN_KEY_NEW=$ADMIN_KEY PROVIDER_KEY_NEW=$PROVIDER_KEY node -e "
+            const o = { ADMIN_KEY: process.env.ADMIN_KEY_NEW, PROVIDER_KEY: process.env.PROVIDER_KEY_NEW };
             if ((process.env.RELAY_KEY || '').length >= 24) o.RELAY_KEY = process.env.RELAY_KEY;
             if (process.env.GOOGLE_URL) o.GOOGLE_URL = process.env.GOOGLE_URL;
             require('fs').writeFileSync('/tmp/secrets.json', JSON.stringify(o));
@@ -93,6 +98,7 @@ jobs:
             case "$a" in
               import) echo "== import"; ask cf_import | jq -c '{ok, error, props, scriptVersion, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
               send) echo "== send"; ask cf_send | jq -c . ;;
+              tenants) echo "== businesses"; curl -s -m 60 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"tenant_list\",\"providerKey\":\"$PROVIDER_KEY\"}" "$URL/provider" | jq -c . ;;
               status) echo "== status"; ask cf_status | jq -c '{ok, error, version, waitingForGoogle, imported, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
             esac
           done
