@@ -97,7 +97,15 @@ jobs:
           ask() { curl -s -m 900 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"$1\",\"adminKey\":\"$ADMIN_KEY\"}" "$URL"; }
           for a in $ACTIONS; do
             case "$a" in
-              import) echo "== import"; ask cf_import | jq -c '{ok, error, props, scriptVersion, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
+              import) echo "== import (in batches)"
+                first=true
+                for n in $(seq 1 300); do
+                  body="{\"kind\":\"cf_import\",\"adminKey\":\"$ADMIN_KEY\",\"restart\":$first}"; first=false
+                  r=$(curl -s -m 900 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "$body" "$URL")
+                  echo "$r" | jq -c '{ok, error, done, at, of, props, sheets: [.sheets[]? | "\(.name) \(.rows)"]}'
+                  [ "$(echo "$r" | jq -r .ok)" = "true" ] || break
+                  [ "$(echo "$r" | jq -r .done)" = "true" ] && break
+                done ;;
               send) echo "== send"; ask cf_send | jq -c . ;;
               tenants) echo "== businesses"; curl -s -m 60 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"tenant_list\",\"providerKey\":\"$PROVIDER_KEY\"}" "$URL/provider" | jq -c . ;;
               status) echo "== status"; ask cf_status | jq -c '{ok, error, version, waitingForGoogle, imported, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
