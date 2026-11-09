@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 23;                // 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 24;                // 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -107,6 +107,9 @@ function cleanEmails_(list) {
 // ---------------------------------------------------------------- tablet → cloud
 function doPost(e) {
   REQ_ = {}; // what this request has read already (a request never reads the same sheet twice)
+  // script 24: the data spreadsheet check runs before anything is read from the cache (the cached device list of an
+  // empty spreadsheet must not answer "not known" first).
+  try { if (props_().getProperty('DATA_ID') && props_().getProperty('DATA_CHECKED') !== String(SCRIPT_VERSION)) data_(); } catch (eData) { /* data_ answers for itself below */ }
   try {
     const body = JSON.parse(e.postData.contents);
     // Viber calls this address (the channel's webhook) to check it is alive, and with channel events: just say OK.
@@ -818,7 +821,11 @@ function data_() {
   if (id) {
     let err = null;
     for (let i = 0; i < 3; i++) {
-      try { const ss0 = SpreadsheetApp.openById(id); REQ_.ss = ss0; REQ_.ssId = id; return ss0; } catch (e) { err = e; try { Utilities.sleep(400 * (i + 1)); } catch (e2) { /* no wait */ } }
+      let ss0 = null;
+      try { ss0 = SpreadsheetApp.openById(id); } catch (e) { err = e; try { Utilities.sleep(400 * (i + 1)); } catch (e2) { /* no wait */ } continue; }
+      const healed = healData_(ss0, props);
+      REQ_.ss = healed; REQ_.ssId = healed.getId();
+      return healed;
     }
     log_('Data', ['The data spreadsheet could not be opened', String(err && err.message || err).slice(0, 200)]);
     throw new Error('The cloud could not open its data just now. Nothing was changed – it tries again by itself in a minute.');
@@ -827,6 +834,47 @@ function data_() {
   try { DriveApp.getFileById(ss.getId()).moveTo(root_()); } catch (e) { /* stays in My Drive */ }
   props.setProperty('DATA_ID', ss.getId());
   return ss;
+}
+// script 24 (10 Nov): on 8 Nov a glitch made a NEW empty data spreadsheet and DATA_ID moved to it, so every device was
+// "not known" until someone fixed DATA_ID by hand. Now the cloud checks once (per script version): if another
+// "Easy Buys Data" spreadsheet in Drive holds clearly more (it has the devices and the records), it goes back to that
+// one by itself. The empty one is renamed, never deleted.
+function dataScore_(ss) {
+  let rows = 0;
+  let devices = 0;
+  try { ss.getSheets().forEach(function (sh) { const n = Math.max(0, (sh.getLastRow() || 0) - 1); rows += n; if (String(sh.getName()) === 'Devices') devices = n; }); } catch (e) { /* cannot read: 0 */ }
+  return { rows: rows, devices: devices };
+}
+function healData_(ss, props) {
+  if (props.getProperty('DATA_CHECKED') === String(SCRIPT_VERSION)) return ss;
+  props.setProperty('DATA_CHECKED', String(SCRIPT_VERSION));
+  try {
+    const mine = dataScore_(ss);
+    let best = null;
+    let bestScore = mine;
+    const it = DriveApp.getFilesByName(DATA_NAME);
+    for (let n = 0; it.hasNext() && n < 20; n++) {
+      const f = it.next();
+      try { if (f.isTrashed && f.isTrashed()) continue; } catch (e) { /* keep */ }
+      const fid = f.getId();
+      if (fid === ss.getId()) continue;
+      let other = null;
+      try { other = SpreadsheetApp.openById(fid); } catch (e) { continue; }
+      const sc = dataScore_(other);
+      // Clearly more: more devices AND more records (a few test rows never win).
+      if (sc.devices > bestScore.devices && sc.rows > bestScore.rows + 20) { best = other; bestScore = sc; }
+    }
+    if (!best) return ss;
+    const oldId = ss.getId();
+    props.setProperty('DATA_ID', best.getId());
+    props.setProperty('DATA_ID_BEFORE', oldId);
+    try { DriveApp.getFileById(oldId).setName(DATA_NAME + ' – empty copy, not used (' + now_().slice(0, 10) + ')'); } catch (e) { /* name stays */ }
+    try { REQ_.devRows = null; props.setProperty('DEVROWS_V', String((Number(props.getProperty('DEVROWS_V') || '0') || 0) + 1)); } catch (e) { /* cache runs out */ }
+    try { log_('Data', ['Went back to the real data spreadsheet by itself', best.getId() + ' (' + bestScore.devices + ' devices, ' + bestScore.rows + ' rows) instead of ' + oldId + ' (' + mine.devices + ' devices, ' + mine.rows + ' rows)']); } catch (e) { /* log is best effort */ }
+    return best;
+  } catch (e) {
+    return ss;
+  }
 }
 function sheet_(name, header) {
   const ss = data_();
@@ -2381,7 +2429,7 @@ const KNOWN_TABLES = ['aronium_refunds', 'shift_ends', 'handover_notes', 'verify
   'roster_changes', 'myday_items', 'myday_marks', 'issued_docs', 've_items', 've_due', 've_work', 've_faults', 've_fuel', 've_checks',
   'accountant_queries', 'tax_returns', 'tax_return_versions', 'till_surplus', 'cheque_cover', 'handovers', 'fccc_lists', 'inv_count_entries',
   'inv_item_suppliers', 'aronium_feed', 'duty_lists', 'duty_runs', 'roster_marks', 'verify_queries', 'shop_accounts', 'bin_records', 'bin_parts',
-  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales',
+  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales', 'trade_accounts',
   // tables the main software or older apps may still send
   'suppliers', 'materials', 'products', 'recipes', 'equipment', 'checklists', 'checklist_items', 'shift_names', 'steps', 'product_steps', 'product_decks',
   'safe_counts', 'shop_profiles', 'notifications', 'messages', 'stock_takes', 'handover_notes'];
