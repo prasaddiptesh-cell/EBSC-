@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 24;                // 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 25;                // 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -363,6 +363,27 @@ function route_(body, who) {
         return json_({ ok: true });
       }
 
+      case 'delivery_save': {
+        // script 25: a signed delivery note (PDF) – Records › month › Outbound › customer › Deliveries (the admin's
+        // folders) or Records › month › shop › Deliveries. Nothing is replaced (" (2)").
+        const nice = recordsFolder_(body, ['Deliveries']);
+        if (!nice || !/\.pdf$/i.test(nice.name)) return json_({ ok: false, error: 'No month or name for the delivery note.' });
+        const f = saveFile_(nice.folder, nice.name, body.data, MimeType.PDF);
+        return json_({ ok: true, url: f.getUrl() });
+      }
+
+      case 'customer_email': {
+        // script 25: a delivery note to a customer – only to an email saved on an open customer account (synced trade
+        // accounts), so a device cannot email anyone else.
+        const to = cleanEmails_([body.to]);
+        if (!to.length) return json_({ ok: false, error: 'No valid email address.' });
+        if (!customerEmail_(to[0])) return json_({ ok: false, error: 'This address is not on a customer account.' });
+        const atts = (body.attachments || []).slice(0, 3).map(function (a) { return Utilities.newBlob(Utilities.base64Decode(a.b64), a.mime || 'application/pdf', a.name || 'document.pdf'); });
+        mail_({ to: to[0], subject: String(body.subject || 'Delivery').slice(0, 200), body: String(body.text || '').slice(0, 4000), attachments: atts, name: String(props_().getProperty('BUSINESS_NAME') || 'Easy Buys') });
+        log_('Emails', [to[0], body.subject, atts.length + ' attachment(s)']);
+        return json_({ ok: true });
+      }
+
       case 'payslip_save': {
         // 1.0.0 script 16: a copy of a released payslip (PDF) in Records › month › Payslips. Nothing is replaced (" (2)").
         if (body.typeFolder !== 'Payslips') return json_({ ok: false, error: 'Only payslips are kept here.' });
@@ -470,6 +491,12 @@ function route_(body, who) {
 function busyReply_() { return { ok: false, busy: true, retryMs: 1500 + Math.floor(Math.random() * 2500), error: 'The cloud is busy – trying again.' }; }
 
 // v3.5: payslip addresses are the ones saved in Payroll › Pay details (synced pay_profiles).
+function customerEmail_(addr) {
+  const a = String(addr).trim().toLowerCase();
+  const sh = data_().getSheetByName('T_trade_accounts');
+  if (!sh) return false;
+  return values_(sh).some(function (r) { try { const o = JSON.parse(r[4] || '{}'); return o.kind === 'customer' && o.status !== 'closed' && String(o.email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
+}
 function payEmail_(addr) {
   const a = String(addr).trim().toLowerCase();
   const sh = data_().getSheetByName('T_pay_profiles');
@@ -2429,7 +2456,7 @@ const KNOWN_TABLES = ['aronium_refunds', 'shift_ends', 'handover_notes', 'verify
   'roster_changes', 'myday_items', 'myday_marks', 'issued_docs', 've_items', 've_due', 've_work', 've_faults', 've_fuel', 've_checks',
   'accountant_queries', 'tax_returns', 'tax_return_versions', 'till_surplus', 'cheque_cover', 'handovers', 'fccc_lists', 'inv_count_entries',
   'inv_item_suppliers', 'aronium_feed', 'duty_lists', 'duty_runs', 'roster_marks', 'verify_queries', 'shop_accounts', 'bin_records', 'bin_parts',
-  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales', 'trade_accounts',
+  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales', 'trade_accounts', 'dl_deliveries',
   // tables the main software or older apps may still send
   'suppliers', 'materials', 'products', 'recipes', 'equipment', 'checklists', 'checklist_items', 'shift_names', 'steps', 'product_steps', 'product_decks',
   'safe_counts', 'shop_profiles', 'notifications', 'messages', 'stock_takes', 'handover_notes'];
@@ -3157,7 +3184,7 @@ function oldFilesAway_(at) {
 // against each other in tests/photoNames.test.js).
 const RECORD_FOLDERS = { invoice: 'Invoices', payment: 'Cheques', stub: 'Cheques', deposit: 'Deposits', till: 'Z reports' };
 const RECORD_MONTH_LEVEL = { deposit: 1, till: 1, Deposits: 1, 'Z reports': 1, Payslips: 1, 'Purchase orders': 1, 'Shift reports': 1 };
-const RECORD_TYPE_FOLDERS = ['Invoices', 'Cheques', 'Deposits', 'Z reports', 'Payslips', 'Purchase orders', 'Shift reports'];
+const RECORD_TYPE_FOLDERS = ['Invoices', 'Cheques', 'Deposits', 'Z reports', 'Payslips', 'Purchase orders', 'Shift reports', 'Deliveries'];
 const NAME_LIMIT = 115;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function cleanPart_(s) {
@@ -3237,6 +3264,14 @@ function photoPlace_(o) {
 function recordsFolder_(b, allowed) {
   const type = String(b.typeFolder || '');
   if (allowed && allowed.indexOf(type) < 0) return null;
+  // script 25: the admin's own folder order and names (Wholesale › Filing): Records › month › Inbound › supplier › Invoices.
+  // Up to 5 cleaned folders, one of them the month; anything odd falls back to the shop layout below.
+  if (Array.isArray(b.folders) && ['Invoices', 'Cheques', 'Deliveries'].indexOf(type) >= 0) {
+    const segs = b.folders.slice(0, 5).map(function (x) { return cleanPart_(x).slice(0, 60); }).filter(String);
+    const nm = cleanPart_(b.niceName).slice(0, 120).replace(/ +(\.[A-Za-z0-9]+)$/, '$1');
+    const hasMonth = segs.some(function (x) { return /^\d{4}-\d{2} [A-Za-z]+$/.test(x); });
+    if (segs.length >= 2 && segs.length === b.folders.length && hasMonth && nm && segs.every(function (x) { return x !== '.' && x !== '..'; })) return { folder: path_(['Records'].concat(segs)), name: nm };
+  }
   const month = cleanPart_(b.monthFolder);
   const name = cleanPart_(b.niceName).slice(0, 120).replace(/ +(\.[A-Za-z0-9]+)$/, '$1');
   if (RECORD_TYPE_FOLDERS.indexOf(type) < 0 || !/^\d{4}-\d{2} [A-Za-z]+$/.test(month) || !name) return null;
@@ -3900,7 +3935,7 @@ function histRoute_(body, who) {
 // spreadsheet stays a full backup. Each request is signed with RELAY_KEY (Project settings › Script properties – the
 // same secret as in Cloudflare); none is accepted twice or after 10 minutes. relay_export gives the data once, for the
 // move. Without RELAY_KEY nothing here works.
-const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'pack_email',
+const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'delivery_save', 'customer_email', 'pack_email',
   'support_email', 'viber', 'viber_setup', 'myday_events', 'myday_out', 'calendar', 'fccc_lpg', 'setup_pack', 'tidy_records', 'snapshot',
   'backup', 'backup_part', 'backup_done', 'backup_list', 'backup_get', 'backup_get_part', 'problem_log', 'problem_log_get',
   'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen'];
