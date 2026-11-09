@@ -2456,7 +2456,7 @@ const KNOWN_TABLES = ['aronium_refunds', 'shift_ends', 'handover_notes', 'verify
   'roster_changes', 'myday_items', 'myday_marks', 'issued_docs', 've_items', 've_due', 've_work', 've_faults', 've_fuel', 've_checks',
   'accountant_queries', 'tax_returns', 'tax_return_versions', 'till_surplus', 'cheque_cover', 'handovers', 'fccc_lists', 'inv_count_entries',
   'inv_item_suppliers', 'aronium_feed', 'duty_lists', 'duty_runs', 'roster_marks', 'verify_queries', 'shop_accounts', 'bin_records', 'bin_parts',
-  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales', 'trade_accounts', 'dl_deliveries',
+  'utility_checks', 'product_changes', 'supplier_owed', 'inv_supplier_catalog', 'cig_tallies', 'audit_log', 'recharge_moves', 'recharge_sales', 'trade_accounts', 'dl_deliveries', 'dl_places', 'dl_points', 'dl_events',
   // tables the main software or older apps may still send
   'suppliers', 'materials', 'products', 'recipes', 'equipment', 'checklists', 'checklist_items', 'shift_names', 'steps', 'product_steps', 'product_decks',
   'safe_counts', 'shop_profiles', 'notifications', 'messages', 'stock_takes', 'handover_notes'];
