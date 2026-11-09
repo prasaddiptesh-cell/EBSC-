@@ -93,6 +93,7 @@ jobs:
           echo "health: ${H:-no answer yet}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Status / import / send
         run: |
+          sleep 20 # new keys take a few seconds to reach every Cloudflare location
           ask() { curl -s -m 900 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"$1\",\"adminKey\":\"$ADMIN_KEY\"}" "$URL"; }
           for a in $ACTIONS; do
             case "$a" in
