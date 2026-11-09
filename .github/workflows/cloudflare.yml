@@ -4,6 +4,8 @@
 #   status  – what the Cloudflare cloud holds (sheets and rows, copies waiting for Google)
 #   import  – copy the data from the Google cloud (every sheet and the script properties) – before the switch only
 #   send    – send the copies waiting for Google now
+#   compare – every sheet's rows here against Google's now
+#   open    – after the LAST import: devices may use the Cloudflare cloud (imports are refused from then on)
 #   tenants – the list of businesses on the cloud (plan and licence only)
 # GitHub secrets: CLOUDFLARE_API_TOKEN, RELAY_KEY (also in the Google script's properties), GOOGLE_URL (…/exec).
 # ADMIN_KEY is made new on every run, so nobody has to keep it. Nothing secret is printed (this repository is public).
@@ -106,8 +108,10 @@ jobs:
                   [ "$(echo "$r" | jq -r .ok)" = "true" ] || break
                   [ "$(echo "$r" | jq -r .done)" = "true" ] && break
                 done ;;
+              compare) echo "== compare (rows here vs Google now)"; ask cf_compare | jq -c . ;;
+              open) echo "== open (devices welcome from now; no more imports)"; ask cf_open | jq -c . ;;
               send) echo "== send"; ask cf_send | jq -c . ;;
               tenants) echo "== businesses"; curl -s -m 60 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"tenant_list\",\"providerKey\":\"$PROVIDER_KEY\"}" "$URL/provider" | jq -c . ;;
-              status) echo "== status"; ask cf_status | jq -c '{ok, error, version, waitingForGoogle, imported, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
+              status) echo "== status"; ask cf_status | jq -c '{ok, error, version, waitingForGoogle, imported, open, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
             esac
           done
