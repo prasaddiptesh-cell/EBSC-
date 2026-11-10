@@ -127,6 +127,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          LINK_SIGNING_KEY: ${{ secrets.LINK_SIGNING_KEY }}
         run: |
           New-Item -ItemType Directory -Force -Path pkg | Out-Null
           Copy-Item dist\EasyBuysAroniumLink.exe pkg\
@@ -140,8 +141,17 @@ jobs:
           $sha = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
           $info = @{ build = [int]"${{ github.run_number }}"; version = $ver; size = $f.Length; sha256 = $sha; commit = "${{ github.sha }}" } | ConvertTo-Json -Compress
           [System.IO.File]::WriteAllText("$PWD\link-version.json", $info)
+          # 10 Nov 2026: signed with the secret LINK_SIGNING_KEY (Ed25519) - the till PCs install only a manifest signed
+          # with it (the public half is in updater.py). Without the secret the release is still made, unsigned.
+          $files = @('EasyBuysAroniumLink-Setup.exe', 'EasyBuysAroniumLink-Windows.zip', 'link-version.json')
+          if ($env:LINK_SIGNING_KEY) {
+            python sign_manifest.py --installer EasyBuysAroniumLink-Setup.exe --build ${{ github.run_number }} --version $ver --key-env LINK_SIGNING_KEY --out-dir .
+            if ($LASTEXITCODE -ne 0) { Write-Error "signing failed"; exit 1 }
+            $files += @('link-version.json.sig', 'EasyBuysAroniumLink-Setup.exe.sha256')
+            Write-Host "signed"
+          } else { Write-Host "::warning::LINK_SIGNING_KEY is not set - the till PCs will not install this build by themselves" }
           Get-Content link-version.json
-          gh release create link-latest EasyBuysAroniumLink-Setup.exe EasyBuysAroniumLink-Windows.zip link-version.json --title "Aronium Link for Windows (till PCs) - version $ver build $((python -c 'import build_info; print(build_info.shown_build())').Trim())" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
+          gh release create link-latest @files --title "Aronium Link for Windows (till PCs) - version $ver build $((python -c 'import build_info; print(build_info.shown_build())').Trim())" --notes "On each till PC: download EasyBuysAroniumLink-Setup.exe and run it (Windows may say 'unknown publisher': More info > Run anyway). It shows in Settings > Apps with Uninstall. It only reads Aronium - it never changes Aronium. The .zip is the same program without an installer."
 
       - name: Keep the picture and test output (branch link-preview)
         if: always()
