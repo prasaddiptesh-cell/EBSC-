@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 29;                // 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 31;                // 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -1791,8 +1791,26 @@ function linkCheck_(body) {
       try { out[k] = JSON.parse(JSON.parse(String(sh.getRange(rowNo, 5, 1, 1).getValues()[0][0] || '{}')).data || 'null'); } catch (e) { out[k] = null; }
     });
   }
+  // script 30: { have: true } – which of this till's End of days, sales days and recent receipts are really here (the
+  // Link sends again whatever it sent that is missing – after the two days the cloud wrote to a spare spreadsheet).
+  if (body.have && sh && src) out.have = linkHave_(sh, src, body.have_days);
   out.devices = deviceRows_().filter(function (r) { return String(r[3]) === 'active' && !/^(bridge-|first-device)/.test(String(r[0])); })
     .map(function (r) { return { name: String(r[1]), last_seen: text_(r[6]) }; });
+  return out;
+}
+
+function linkHave_(sh, src, days) {
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  const keep = Math.max(1, Math.min(60, Number(days) || 14));
+  const from = Utilities.formatDate(new Date(Date.now() - keep * 86400000), 'Pacific/Fiji', 'yyyy-MM-dd');
+  const out = [];
+  sh.getRange(2, 1, n, 1).getValues().forEach(function (r) {
+    const k = String(r[0] || '');
+    const p = k.split('|');
+    if (p[0] !== src || p.length < 4) return;
+    if (p[1] === 'z' || p[1] === 'z_items' || p[1] === 'sales_day' || (p[1] === 'receipts' && p[2] >= from)) out.push(k);
+  });
   return out;
 }
 
@@ -3023,8 +3041,8 @@ function linkApi_(body) {
     // 1.0.0 build 5: the Link asks every ~30 s (pull_only: the cheap answer) and says when it has answered a pull
     if (body.pulled) pullDone_(k.source);
     const pull = pullOpen_(k.source);
-    if (body.pull_only) return { ok: true, version: SCRIPT_VERSION, pull: pull };
-    const chk = linkCheck_({ source: k.source });
+    if (body.pull_only) return { ok: true, version: SCRIPT_VERSION, pull: pull, pull_all: pull && pullEverything_(k.source) };
+    const chk = linkCheck_({ source: k.source, have: !!body.have, have_days: body.have_days });
     chk.pull = pull;
     return chk;
   }
@@ -3071,7 +3089,7 @@ function pullTills_(shop) {
   return out.sort();
 }
 function pullView_(shop, p) {
-  return { ok: true, shopCode: shop, at: p ? p.at : null, by: p ? p.by : '', tills: pullTills_(shop), answered: p ? Object.keys(p.done || {}).sort() : [] };
+  return { ok: true, shopCode: shop, at: p ? p.at : null, by: p ? p.by : '', all: !!(p && p.all), tills: pullTills_(shop), answered: p ? Object.keys(p.done || {}).sort() : [] };
 }
 function linkPullRequest_(body, who) {
   const shop = String(body.shopCode || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
@@ -3089,12 +3107,16 @@ function linkPullRequest_(body, who) {
     Object.keys(all).forEach(function (s) { if (!(t - Number(all[s] && all[s].ms) < PULL_OPEN_MS)) delete all[s]; });
     const p = all[shop];
     if (body.check) return pullView_(shop, p);
+    if (p && body.all && !p.all) { // asked for everything while a normal ask is open: it becomes "everything", asked again
+      p.all = true; p.done = {}; p.ms = t; pullSave_(all); log_('Link pull', [shop, 'everything again', p.by]);
+      return pullView_(shop, p);
+    }
     if (p && t - Number(p.ms) < PULL_GAP_MS) {
       const v = pullView_(shop, p);
       v.already = true; v.wait = Math.ceil((PULL_GAP_MS - (t - Number(p.ms))) / 1000);
       return v;
     }
-    all[shop] = { ms: t, at: now_(), by: esc_(String(u.name || who.user.name || '').slice(0, 60)), device: esc_(String(who.deviceId || '').slice(0, 60)), done: {} };
+    all[shop] = { ms: t, at: now_(), by: esc_(String(u.name || who.user.name || '').slice(0, 60)), device: esc_(String(who.deviceId || '').slice(0, 60)), done: {}, all: !!body.all };
     pullSave_(all);
     log_('Link pull', [shop, all[shop].by, all[shop].device]);
     return pullView_(shop, all[shop]);
@@ -3105,6 +3127,8 @@ function pullOpen_(source) {
   const p = pullAll_()[String(source).split('-')[0]];
   return !!p && Date.now() - Number(p.ms) < PULL_OPEN_MS && !(p.done || {})[source];
 }
+// script 31 (owner, 10 Nov): "Send everything again" – the till PCs send every record again, not only what changed.
+function pullEverything_(source) { const p = pullAll_()[String(source).split('-')[0]]; return !!(p && p.all); }
 function pullDone_(source) {
   if (!pullOpen_(source)) return;
   withLock_(function () {
