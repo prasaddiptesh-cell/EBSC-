@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 26;                // 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 27;                // 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -118,6 +118,10 @@ function doPost(e) {
     // editor), this Google cloud only works as Cloudflare's bridge (relay); every phone, till PC and office PC is told
     // where the business is now, and keeps what it has not sent until it is there. Nothing is written here any more.
     const moveTo = movedTo_();
+    // script 27: the till PCs' Link and the office PC software cannot all be updated at once, so after the move their
+    // requests are passed on to the new cloud as they are (the same signed request; the new cloud checks the till key)
+    // and its answer comes back to them. Phones are told the new address instead (they move by themselves).
+    if (moveTo && ['link_push', 'link_check', 'main_pull', 'main_push', 'main_devices', 'main_link_check'].indexOf(body.kind) >= 0) return passOn_(moveTo, e.postData.contents);
     // relay: Cloudflare asking for Drive / email / the AI readers; main_files / main_file_get: the office PC's read-only
     // file mirror, which Cloudflare passes on to Google as it is.
     if (moveTo && ['relay', 'main_files', 'main_file_get'].indexOf(body.kind) < 0) return json_({ ok: false, moved: moveTo, error: 'This business has moved to its new cloud. The app moves by itself.' });
@@ -503,6 +507,16 @@ function customerEmail_(addr) {
   const sh = data_().getSheetByName('T_trade_accounts');
   if (!sh) return false;
   return values_(sh).some(function (r) { try { const o = JSON.parse(r[4] || '{}'); return o.kind === 'customer' && o.status !== 'closed' && String(o.email || '').trim().toLowerCase() === a; } catch (e) { return false; } });
+}
+function passOn_(url, text) {
+  try {
+    const r = UrlFetchApp.fetch(url, { method: 'post', contentType: 'text/plain;charset=utf-8', payload: text, muteHttpExceptions: true, followRedirects: true });
+    const out = r.getContentText();
+    try { JSON.parse(out); } catch (x) { return json_({ ok: false, busy: true, retryMs: 60000, error: 'The new cloud did not answer properly – the till keeps its records and tries again.' }); }
+    return ContentService.createTextOutput(out).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return json_({ ok: false, busy: true, retryMs: 60000, error: 'The new cloud could not be reached – the till keeps its records and tries again.' });
+  }
 }
 function movedTo_() {
   const v = String(props_().getProperty('CLOUD_MOVE_TO') || '').trim();
