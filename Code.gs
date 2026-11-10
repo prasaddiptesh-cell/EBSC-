@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 31;                // 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 32;                // 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -285,6 +285,8 @@ function route_(body, who) {
       case 'invoice_ai': {
         // 1.0.0 an invoice (photos or a PDF) read by Google Gemini with the owner's own free key (Script properties ›
         // GEMINI_KEY). Answers { ok, invoice: {…}, model } or { ok: false, code: 'NO_AI_KEY' | 'AI_ERROR', error }.
+        // script 32 (owner, 10 Nov: "there is no AI reading for cheque"): a cheque is read with its own instructions
+        if (body.hints && body.hints.paper === 'cheque') return json_(aiReadInvoice_(body.files || [], {}, { prompt: aiChequePrompt_(body.hints), schema: aiChequeSchema_() }));
         return json_(aiReadInvoice_(body.files || [], body.hints || {}));
       }
 
@@ -2285,6 +2287,28 @@ function aiPrompt_(hints) {
     known.length ? 'Known suppliers (use the exact name when it is one of these): ' + known.join('; ') + '.' : '',
     h.bill ? aiBillPrompt_(h.bill) : '',
   ].filter(String).join('\n');
+}
+// script 32: a photo of a cheque (one the business wrote to a supplier, or one received).
+function aiChequePrompt_(hints) {
+  const known = (Array.isArray(hints && hints.suppliers) ? hints.suppliers : []).map(function (x) { return String(x || '').replace(/[\r\n]+/g, ' ').slice(0, 80); }).filter(String).slice(0, 200);
+  return [
+    'You read a photo of a bank cheque from Fiji (currency FJD). Read only what is written or printed on it; use null for anything you cannot see.',
+    'cheque_no: the cheque serial number (printed at the top right, and as the first group of digits in the magnetic line at the bottom) – digits only, without leading zeros.',
+    'date: the date written on the cheque, day/month/year in Fiji, given as YYYY-MM-DD. payee: the name after "Pay" (who the cheque is made out to).',
+    'amount: the amount in figures (the box with $), a plain number. amount_words_value: the amount written in words, as a plain number (e.g. "Four hundred and twenty dollars 67 cents" = 420.67).',
+    'Handwriting: 420-67 or 420=67 means 420.67; "/-" or "only" ends the amount. bank: the bank name (BSP, ANZ, Westpac, BRED, HFC, Bank of Baroda…). account_name: the account holder printed on the cheque. account_no: the account number from the magnetic line if clear.',
+    'crossed: true when two parallel lines (with or without "A/C payee") cross the cheque. signed: true when there is a signature.',
+    known.length ? 'Known suppliers (use the exact name for the payee when it is clearly one of these): ' + known.join('; ') + '.' : '',
+  ].filter(String).join('\n');
+}
+function aiChequeSchema_() {
+  const s = function (d) { return { type: 'STRING', description: d, nullable: true }; };
+  const n = function (d) { return { type: 'NUMBER', description: d, nullable: true }; };
+  return { type: 'OBJECT', properties: {
+    cheque_no: s('Cheque serial number, digits only'), date: s('YYYY-MM-DD'), payee: s('Pay … (made out to)'), amount: n('Amount in figures'),
+    amount_words_value: n('The amount written in words, as a number'), bank: s('Bank name'), account_name: s('Account holder'), account_no: s('Account number'),
+    crossed: { type: 'BOOLEAN', nullable: true }, signed: { type: 'BOOLEAN', nullable: true }, notes: s('Anything unclear'),
+  }, required: ['cheque_no', 'amount'] };
 }
 function aiScrub_(msg, key) {
   let m = String(msg || '');
