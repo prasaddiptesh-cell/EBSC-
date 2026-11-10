@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 27;                // 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 28;                // 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -3538,6 +3538,19 @@ function viberOnceKeep_(key) {
 // for the owner to look at. The owner enters the sales of each day or month (standard-rated and zero-rated, incl. VAT),
 // works through each month and closes it; a closed month changes only after the owner / an admin opens it again.
 const HIST_ROOT_NAME = 'EBSC Invoices Records';
+// script 28: the shared folder's real name ends with a space ("EBSC Invoices Records "), so the exact name was never
+// found: HIST_ROOT_ID (Script properties, else Easy Buys' folder), then any folder whose trimmed name matches.
+const HIST_ROOT_ID_DEFAULT = '1Cq1wiG4igWsTEm5FI7WJCJ9YemSmSXNE';
+function histRoot_() {
+  const id = String(PropertiesService.getScriptProperties().getProperty('HIST_ROOT_ID') || HIST_ROOT_ID_DEFAULT);
+  try { const f = DriveApp.getFolderById(id); if (f) return f; } catch (e) { /* not this account's – look by name */ }
+  try {
+    const it = DriveApp.searchFolders("title contains 'EBSC Invoices Records' and trashed = false");
+    while (it.hasNext()) { const f = it.next(); if (String(f.getName()).trim() === HIST_ROOT_NAME) return f; }
+  } catch (e) { /* none */ }
+  try { const it = DriveApp.getFoldersByName(HIST_ROOT_NAME); if (it.hasNext()) return it.next(); } catch (e) { /* none */ }
+  return null;
+}
 const HIST_INV_HEADER = ['key', 'file_id', 'shop', 'folder', 'file', 'url', 'supplier', 'tin', 'invoice_no', 'date', 'subtotal', 'vat', 'total', 'zero', 'status', 'why', 'by', 'at', 'model'];
 const HIST_Q_HEADER = ['file_id', 'shop', 'folder', 'file', 'url', 'mime', 'size', 'state', 'tries', 'at', 'why'];
 const HIST_SALES_HEADER = ['key', 'ym', 'shop', 'json', 'at', 'by'];
@@ -3583,7 +3596,7 @@ function histFolders_(body) {
   let root = null;
   try {
     if (body && body.rootId) root = DriveApp.getFolderById(String(body.rootId));
-    else { const it = DriveApp.getFoldersByName(HIST_ROOT_NAME); if (it.hasNext()) root = it.next(); }
+    else root = histRoot_();
   } catch (e) { root = null; }
   if (!root) return { ok: false, error: 'The folder "' + HIST_ROOT_NAME + '" was not found in the Google Drive of the cloud. In Google Drive (signed in as easybuylautoka), share it with easybuys.projects@gmail.com; then, signed in as easybuys.projects, open Shared with me, right-click the folder › Organise › Add shortcut › My Drive, and try again.' };
   const out = [];
