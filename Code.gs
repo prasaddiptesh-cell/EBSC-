@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 32;                // 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 33;                // 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -2285,6 +2285,7 @@ function aiPrompt_(hints) {
     'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Read every item line, in order, across all pages; do not invent lines. Do not take the SDC / VMS fiscal invoice number as the invoice number.',
     'Give numbers as plain numbers (no $ or commas). Use null for anything not on the invoice.',
     known.length ? 'Known suppliers (use the exact name when it is one of these): ' + known.join('; ') + '.' : '',
+    aiNotesPrompt_(h.notes),
     h.bill ? aiBillPrompt_(h.bill) : '',
   ].filter(String).join('\n');
 }
@@ -2309,6 +2310,13 @@ function aiChequeSchema_() {
     amount_words_value: n('The amount written in words, as a number'), bank: s('Bank name'), account_name: s('Account holder'), account_no: s('Account number'),
     crossed: { type: 'BOOLEAN', nullable: true }, signed: { type: 'BOOLEAN', nullable: true }, notes: s('Anything unclear'),
   }, required: ['cheque_no', 'amount'] };
+}
+// script 33 (owner, 10 Nov: "it needs to learn each time"): what the app learned from earlier invoices of each supplier
+// (its numbers, its usual VAT, figures read wrong before and what they really were) – the phone sends it as hints.notes.
+function aiNotesPrompt_(notes) {
+  if (!notes || typeof notes !== 'object') return '';
+  const lines = Object.keys(notes).slice(0, 80).map(function (k) { return '- ' + String(k).replace(/[\r\n]+/g, ' ').slice(0, 80) + ': ' + String(notes[k] || '').replace(/[\r\n]+/g, ' ').slice(0, 400); }).filter(function (l) { return l.length > 4; });
+  return lines.length ? 'What was learned from this business\'s earlier invoices (use it when the invoice is from one of these suppliers; do not repeat a mistake listed):\n' + lines.join('\n') : '';
 }
 function aiScrub_(msg, key) {
   let m = String(msg || '');
