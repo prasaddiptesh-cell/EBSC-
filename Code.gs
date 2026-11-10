@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 28;                // 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 29;                // 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -3555,6 +3555,7 @@ const HIST_INV_HEADER = ['key', 'file_id', 'shop', 'folder', 'file', 'url', 'sup
 const HIST_Q_HEADER = ['file_id', 'shop', 'folder', 'file', 'url', 'mime', 'size', 'state', 'tries', 'at', 'why'];
 const HIST_SALES_HEADER = ['key', 'ym', 'shop', 'json', 'at', 'by'];
 const HIST_RUN_MS = 270000;              // a trigger may run 6 minutes; stop starting new work after 4½
+const HIST_LIST_MS = 60000;               // script 29: finding files, per run, before reading
 const HIST_FILE_MS = 75000;              // one reading takes up to about a minute
 const HIST_MAX_BYTES = 14 * 1024 * 1024; // base64 grows a third; Gemini takes about 20 MB
 // Fiji VAT: 15% until 31 July 2025, 12.5% from 1 August 2025 (FRCS).
@@ -3627,6 +3628,35 @@ function histTrigger_(on) {
     if (!on) all.forEach(function (t) { ScriptApp.deleteTrigger(t); });
   } catch (e) { /* the owner can run histRun from the editor once to allow it */ }
 }
+// script 29: reading goes on by itself every 10 minutes (the app does not need to be open) – only if Google allowed
+// the timer. When it did not (or the last run is over half an hour old), say how to switch it on.
+// script 29: [{ ym, files, read, failed, left, now }] newest month first; `now` = the month being read (the newest with
+// files left – one month is finished before the next starts).
+function histMonthProgress_(q, job) {
+  const m = {};
+  q.forEach(function (r) {
+    const ym = String(r.folder || '').slice(0, 7) || '?';
+    const x = m[ym] || (m[ym] = { ym: ym, files: 0, read: 0, failed: 0, left: 0, now: false });
+    x.files += 1;
+    if (r.state === 'done') x.read += 1;
+    else if (r.state === 'failed' || r.state === 'too_big') x.failed += 1;
+    else x.left += 1;
+  });
+  const out = Object.keys(m).sort().reverse().map(function (k) { return m[k]; });
+  const cur = out.filter(function (x) { return x.left; })[0];
+  if (cur && job && !job.paused) cur.now = true;
+  return out;
+}
+function histTimerNote_(job, left, run) {
+  if (!job || job.paused || (job.listed && !left)) return '';
+  let on = false;
+  try { on = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'histRun'; }); } catch (e) { on = false; }
+  if (!on) { histTrigger_(true); try { on = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'histRun'; }); } catch (e) { on = false; } }
+  if (!on) return 'Background reading is not switched on yet. On the computer: open the Easy Buys cloud in Apps Script, choose histRun at the top, press Run once and allow it. After that it reads by itself every 10 minutes, with the app closed.';
+  const last = Date.parse(run.at || '');
+  if (isFinite(last) && Date.now() - last > 1800000) return 'The background reader has not run for over 30 minutes. It carries on by itself; if this stays, open Apps Script › Triggers and check histRun.';
+  return '';
+}
 function histPause_(on) {
   const job = histJob_();
   if (!job) return { ok: false, error: 'Nothing is being read.' };
@@ -3647,7 +3677,8 @@ function histStatus_() {
     failed: n(function (r) { return r.state === 'failed' || r.state === 'too_big'; }),
     invoices: inv.filter(function (r) { return ['ok', 'fixed'].indexOf(r.status) >= 0; }).length,
     open: inv.filter(function (r) { return r.status === 'check'; }).length,
-    last_run: run.at || '', last_error: run.error || '', wait_until: run.wait_until || '',
+    months: histMonthProgress_(q, job), // script 29: per month (newest first) – what the screen's progress bars show
+    last_run: run.at || '', last_error: run.error || histTimerNote_(job, n(function (r) { return !r.state || r.state === 'retry'; }), run), wait_until: run.wait_until || '',
   };
 }
 
@@ -3663,8 +3694,9 @@ function histRunNow_(deadline) {
   run.running_until = deadline + 60000; histSetRun_(run);
   let did = { listed: 0, read: 0 };
   try {
-    if (!job.listed) did.listed = histList_(job, deadline);
-    if (job.listed) did.read = histReadSome_(job, deadline, run);
+    // script 29: a minute of finding files, then reading what was found (newest month first) – no waiting for every folder
+    if (!job.listed) did.listed = histList_(job, Math.min(deadline, Date.now() + HIST_LIST_MS));
+    did.read = histReadSome_(job, deadline, run);
     run.error = run.error && did.read ? '' : run.error;
   } catch (e) {
     run.error = String(e && e.message ? e.message : e).slice(0, 300);
@@ -3685,13 +3717,15 @@ function histList_(job, deadline) {
   const add = [];
   let found = 0;
   while (job.stack.length && Date.now() < deadline) {
+    // script 29: month by month, the newest month first (shop folders before their month folders)
+    job.stack.sort(function (a, b) { return (a.ym ? 1 : 0) - (b.ym ? 1 : 0) || (a.ym < b.ym ? 1 : a.ym > b.ym ? -1 : 0); });
     const top = job.stack.shift();
     let f;
     try { f = DriveApp.getFolderById(top.id); } catch (e) { continue; }
     const ym = histFolderYm_(f.getName()) || top.ym;
     if (ym && ym + '-01' >= job.before) continue; // from the cut-off on, the app's own records
     const subs = f.getFolders();
-    while (subs.hasNext()) { const s = subs.next(); job.stack.push({ id: s.getId(), shop: top.shop, ym: ym }); }
+    while (subs.hasNext()) { const s = subs.next(); job.stack.push({ id: s.getId(), shop: top.shop, ym: histFolderYm_(s.getName()) || ym }); }
     const files = f.getFiles();
     while (files.hasNext()) {
       const x = files.next();
@@ -3748,7 +3782,8 @@ function histReadSome_(job, deadline, run) {
   const seen = {};
   iv.rows.forEach(function (r) { if (['ok', 'fixed', 'check'].indexOf(r.status) >= 0) seen[histDupKey_(r)] = r.file; });
   let done = 0;
-  const todo = qq.rows.filter(function (r) { return !r.state || r.state === 'retry'; });
+  const todo = qq.rows.filter(function (r) { return !r.state || r.state === 'retry'; })
+    .sort(function (a, b) { return String(b.folder || '') < String(a.folder || '') ? -1 : String(b.folder || '') > String(a.folder || '') ? 1 : 0; }); // script 29: newest month first
   for (let i = 0; i < todo.length; i++) {
     if (Date.now() + HIST_FILE_MS > deadline) break;
     const q = todo[i];
