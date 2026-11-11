@@ -57,6 +57,25 @@ jobs:
           npx expo export --platform web --output-dir dist 2>&1 | tee export.log
           test -f dist/index.html || { echo "::error::The website did not build – see the log above"; exit 1; }
           cp web/_headers dist/_headers 2>/dev/null || true
+          # The app's files never change once built (their names carry a fingerprint): the browser keeps them, so only
+          # the first visit downloads the 6 MB; index.html itself is always checked again.
+          printf '\n/_expo/static/*\n  Cache-Control: public, max-age=31536000, immutable\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n/node_modules/*\n  Cache-Control: public, max-age=31536000, immutable\n/index.html\n  Cache-Control: no-cache\n/\n  Cache-Control: no-cache\n' >> dist/_headers
+          # A "Loading" page in the HTML itself: shows at once, while the app downloads on a slow phone line
+          # (before, the page stayed white until all of the app had arrived). The app removes it when it starts.
+          python3 - <<'PY'
+          p = 'dist/index.html'
+          s = open(p).read()
+          boot = ('<div id="eb-boot" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;background:#F4F1EC;font-family:system-ui,sans-serif;z-index:99999;text-align:center">'
+                  '<div style="max-width:460px"><div style="font-size:30px;font-weight:900;color:#DA2A2F">Easy Buys</div>'
+                  '<div style="margin-top:14px;font-size:16px;color:#2B1A1C">Loading… The first time on a phone this can take up to a minute; after that it opens quickly.</div></div></div>')
+          if 'id="eb-boot"' not in s:
+              i = s.find('<body')
+              j = s.find('>', i) + 1
+              s = s[:j] + boot + s[j:]
+          s = s.replace('<head>', '<head><meta name="theme-color" content="#DA2A2F">', 1)
+          open(p, 'w').write(s)
+          print('loading page added')
+          PY
           ls -la dist | head -30
           du -sh dist
       - name: Put it on Cloudflare
