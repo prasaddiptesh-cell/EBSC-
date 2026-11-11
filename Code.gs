@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 36;                // 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 37;                // 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -2844,7 +2844,11 @@ function userByEmail_(email) {
 }
 function limited_(cache, key, max, secs) { const n = Number(cache.get(key) || '0'); if (n >= max) return true; cache.put(key, String(n + 1), secs); return false; }
 const EMAIL_SAME = 'If this email may log in, a code has been sent to it.';
-const EMAIL_FAIL = 'The email, password or code is not right (or the code is too old). Try again.';
+const EMAIL_FAIL = 'That code is not right or is too old – tap "send a new code" and use the newest email.';
+// script 37: login codes and website tickets kept in the script properties (a few minutes) – the new cloud's quick
+// cache is lost whenever it restarts, which made a correct code "too old" a minute later.
+function tcGet_(k) { const p = props_(); const v = p.getProperty('TC_' + k); if (!v) return null; try { const o = JSON.parse(v); if (!(o.until > Date.now())) { p.deleteProperty('TC_' + k); return null; } return o.v; } catch (e) { return null; } }
+function tcPut_(k, v, secs) { if (v === 'null') { props_().deleteProperty('TC_' + k); return; } props_().setProperty('TC_' + k, JSON.stringify({ v: String(v), until: Date.now() + 1000 * Math.max(1, Number(secs) || 300) })); }
 function emailLoginStart_(body) {
   const cache = CacheService.getScriptCache();
   const e = String(body.email || '').trim().toLowerCase();
@@ -2853,7 +2857,7 @@ function emailLoginStart_(body) {
   const u = userByEmail_(e);
   if (!u || String(u.active) === '0' || (!body.web && !props_().getProperty('PW_' + u.uid))) return { ok: true, message: EMAIL_SAME };
   const code = String(100000 + Math.floor(Math.random() * 900000));
-  cache.put('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
+  tcPut_('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
   mailEssential_({ to: e, subject: 'Easy Buys login code', body: 'Your Easy Buys login code is ' + code + '. It works for 5 minutes. If you did not ask for it, tell the owner.', name: 'Easy Buys' });
   return { ok: true, message: EMAIL_SAME };
 }
@@ -2891,7 +2895,7 @@ function webCode_(body) {
   const u = chk.user;
   if (!props_().getProperty('PV_' + u.uid)) return { ok: false, error: 'Your PIN has not reached the cloud yet – log in once on a phone or tablet, then try again.' };
   const ticket = Utilities.getUuid().replace(/-/g, '');
-  CacheService.getScriptCache().put('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
+  tcPut_('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
   return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || ''), role: String(u.role || '') };
 }
 function webJoin_(body) {
@@ -2902,16 +2906,16 @@ function webJoin_(body) {
   const cache = CacheService.getScriptCache();
   const tk = 'web_t_' + String(body.ticket || '').replace(/[^a-f0-9]/gi, '').slice(0, 40);
   let t = null;
-  try { t = JSON.parse(cache.get(tk) || 'null'); } catch (x) { t = null; }
+  try { t = JSON.parse(tcGet_(tk) || 'null'); } catch (x) { t = null; }
   if (!t || !t.uid) return { ok: false, error: 'The login took too long – start again with your email.' };
   if (!proofOk_(t.uid, body.proof)) {
     t.tries = (t.tries || 0) + 1;
     failCount_('email', t.email, { person: t.email, what: '5 wrong PINs on the website' });
-    if (t.tries >= 5) { cache.put(tk, 'null', 1); return { ok: false, error: 'Wrong PIN 5 times – start again with your email.' }; }
-    cache.put(tk, JSON.stringify(t), 300);
+    if (t.tries >= 5) { tcPut_(tk, 'null', 1); return { ok: false, error: 'Wrong PIN 5 times – start again with your email.' }; }
+    tcPut_(tk, JSON.stringify(t), 300);
     return { ok: false, error: 'Wrong PIN.' };
   }
-  cache.put(tk, 'null', 1);
+  tcPut_(tk, 'null', 1);
   const u = cloudUser_(t.uid);
   if (!u || String(u.active) === '0') return { ok: false, error: EMAIL_FAIL };
   u.uid = t.uid;
@@ -2951,7 +2955,7 @@ function emailCheck_(body, what) {
   if (limited_(cache, 'el_f_' + caller_(body), 20, 3600)) return { ok: false, error: EMAIL_FAIL };
   if (!emailOn_()) return { ok: false, error: EMAIL_FAIL };
   let c = null;
-  try { c = JSON.parse(cache.get(ck) || 'null'); } catch (x) { c = null; }
+  try { c = JSON.parse(tcGet_(ck) || 'null'); } catch (x) { c = null; }
   if (!c || !(c.exp > Date.now()) || c.tries >= 5) { failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' }); return { ok: false, error: EMAIL_FAIL }; }
   const u = userByEmail_(e);
   const pw = u ? props_().getProperty('PW_' + u.uid) : null;
@@ -2961,10 +2965,10 @@ function emailCheck_(body, what) {
   if (!u || String(u.active) === '0' || !codeOk || !passOk) {
     failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' });
     c.tries += 1;
-    if (c.tries >= 5) cache.put(ck, 'null', 1); else cache.put(ck, JSON.stringify(c), Math.max(1, Math.round((c.exp - Date.now()) / 1000)));
+    if (c.tries >= 5) tcPut_(ck, 'null', 1); else tcPut_(ck, JSON.stringify(c), Math.max(1, Math.round((c.exp - Date.now()) / 1000)));
     return { ok: false, error: EMAIL_FAIL };
   }
-  cache.put(ck, 'null', 1);
+  tcPut_(ck, 'null', 1);
   return { ok: true, user: u };
 }
 function emailLoginFinish_(body) {
