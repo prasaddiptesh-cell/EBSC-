@@ -1,0 +1,82 @@
+# The Easy Buys website: the same app, built for a browser and put on Cloudflare (Easy Buys' own account – never
+# Vukavata's) as the Worker "easybuys-web" (static files only; the data stays in the cloud Worker "easybuys-cloud").
+# Runs when main (or the test branch "web") is pushed, or by hand.
+name: Build the Easy Buys website
+on:
+  push:
+    branches: [main, web]
+  workflow_dispatch:
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: d06406ec1740e1ac63b8b8c02d500c1e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unpack the app
+        run: |
+          rm -rf app /tmp/unz && unzip -q -o EasyBuys.zip -d /tmp/unz
+          if [ -f /tmp/unz/package.json ]; then mv /tmp/unz app; else mv "$(dirname "$(ls /tmp/unz/*/package.json | head -1)")" app; fi
+      - name: Install the libraries (with the browser parts)
+        working-directory: app
+        run: |
+          npm install --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps
+          npx expo install react-dom react-native-web @expo/metro-runtime -- --no-audit --no-fund || npx expo install react-dom react-native-web @expo/metro-runtime -- --legacy-peer-deps
+          # expo-sqlite (alpha on the web) – three fixes in its helper between the page and the browser database:
+          #  1. with Atomics.pause (new Chrome) a call gave up after a few milliseconds ("Sync operation timeout")
+          #  2. the answer's length was written as ONE byte (answers longer than 255 characters came back cut off:
+          #     "Unterminated string in JSON")
+          #  3. room for bigger answers (1 MB → 4 MB), and a clear error instead of a crash when one is bigger still
+          python3 - <<'PY'
+          p = 'node_modules/expo-sqlite/web/WorkerChannel.ts'
+          s = open(p).read()
+          rep = [
+            ("if (i > 1_000_000) {", "if (i > 3_000_000_000) {"),
+            ("resultArray.set(new Uint32Array([length]), 0);", "new Uint32Array(resultBuffer, 0, 1)[0] = length;"),
+            ("const resultBuffer = new SharedArrayBuffer(1024 * 1024);", "const resultBuffer = new SharedArrayBuffer(4 * 1024 * 1024);"),
+            ("    const resultBytes = new TextEncoder().encode(resultJson);",
+             "    let resultBytes = new TextEncoder().encode(resultJson);\n    if (resultBytes.length + 4 > resultBuffer.byteLength) resultBytes = new TextEncoder().encode(serialize({ error: 'The answer is too big for the browser (' + resultBytes.length + ' bytes)' }));"),
+          ]
+          for a, b in rep:
+            assert a in s, a
+            s = s.replace(a, b)
+          open(p, 'w').write(s)
+          print('expo-sqlite web helper patched')
+          PY
+      - name: Build the website
+        working-directory: app
+        run: |
+          npx expo export --platform web --output-dir dist 2>&1 | tee export.log
+          test -f dist/index.html || { echo "::error::The website did not build – see the log above"; exit 1; }
+          cp web/_headers dist/_headers 2>/dev/null || true
+          ls -la dist | head -30
+          du -sh dist
+      - name: Put it on Cloudflare
+        working-directory: app
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::The secret CLOUDFLARE_API_TOKEN is missing"; exit 1; }
+          cat > wrangler.web.toml <<'TOML'
+          name = "easybuys-web"
+          compatibility_date = "2025-10-01"
+          [assets]
+          directory = "./dist"
+          not_found_handling = "single-page-application"
+          TOML
+          npx --yes wrangler@4 deploy --config wrangler.web.toml 2>&1 | grep -v -i "token" | tail -15
+          echo "Website: https://easybuys-web.easybuys.workers.dev"
+      - name: Open the website in a real browser and look
+        if: always()
+        run: |
+          mkdir -p /tmp/wc && cp .github/tools/webcheck.mjs /tmp/wc/ && cd /tmp/wc
+          npm init -y >/dev/null && npm i --no-audit --no-fund playwright@1 >/dev/null 2>&1 && npx playwright install --with-deps chromium >/dev/null 2>&1
+          node webcheck.mjs || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: website-check
+          path: /tmp/wc/*.png
