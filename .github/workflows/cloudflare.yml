@@ -27,6 +27,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Durable Objects use (rows written per hour, last 30 hours – numbers only)
+        continue-on-error: true
+        run: |
+          since=$(date -u -d '-30 hours' +%Y-%m-%dT%H:00:00Z); until=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          q="{\"query\":\"{ viewer { accounts(filter:{accountTag:\\\"$CLOUDFLARE_ACCOUNT_ID\\\"}) { durableObjectsPeriodicGroups(limit:200, filter:{datetimeHour_geq:\\\"$since\\\", datetimeHour_leq:\\\"$until\\\"}, orderBy:[datetimeHour_ASC]) { dimensions { datetimeHour namespaceId } sum { rowsWritten rowsRead requests storageWriteUnits } } } } }\"}"
+          curl -s -X POST -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$q" https://api.cloudflare.com/client/v4/graphql \
+            | jq -c '.errors // (.data.viewer.accounts[0].durableObjectsPeriodicGroups[] | {h: .dimensions.datetimeHour, ns: (.dimensions.namespaceId[0:6]), w: .sum.rowsWritten, r: .sum.rowsRead, req: .sum.requests, wu: .sum.storageWriteUnits})'
       - name: The app source (EasyBuys.zip)
         run: |
           mkdir -p app && cd app && unzip -q ../EasyBuys.zip
