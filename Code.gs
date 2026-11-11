@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 39;                // 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 41;                // 12 Nov (e): a device's download finds a record by its key when it is no longer at the row its change points to (after the move to Cloudflare the website never got records not changed since – vehicles, cheque books). 12 Nov (d): the invoices from before the app are read with their item lines (H_lines) and the app takes them a page at a time (hist_lines) to pair each supplier's products and costs. 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -162,6 +162,9 @@ function route_(body, who) {
     if (body.kind === 'user_login') return json_(userLogin_(body, who));
     if (body.kind === 'link_pull_request') return json_(linkPullRequest_(body, who));
     if (body.kind === 'push') return json_(push_(body.records || [], who.deviceId, who));
+    if (body.kind === 'sync_check') return json_(syncCheck_(who)); // script 41: the two-way check
+    if (body.kind === 'sync_keys') return json_(syncKeys_(body, who));
+    if (body.kind === 'sync_rows') return json_(syncRows_(body, who));
     if (body.kind === 'pull') { const out = pull_(Number(body.since) || 0, who.deviceId, false, who, Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
       // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
       if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.deviceRole = roleOf_(who) || null; out.user = who.user ? who.user.role : null; return json_(out); }
@@ -1246,6 +1249,22 @@ function pull_(since, deviceId, forMain, who, limit) {
   want.forEach(function (w) { (byTable[w.table] = byTable[w.table] || []).push(w.rowNo); });
   const rows = {};
   Object.keys(byTable).forEach(function (t) { const sh = data_().getSheetByName('T_' + t); rows[t] = sh ? rowsAt_(sh, byTable[t]) : {}; });
+  // script 41 (owner, 12 Nov: "the data is there – why isn't it displayed?"): a record no longer at the row its change
+  // points to (the tables were laid out again in the move to Cloudflare, or compacted) is found by its key – before, it
+  // was skipped in the hope of a newer change, so a device joining after the move never got records not changed since
+  // (vehicles, cheque books).
+  const moved = {};
+  want.forEach(function (w) { const r = rows[w.table][w.rowNo]; if (!r || String(r[0]) !== String(list[w.i][2])) (moved[w.table] = moved[w.table] || []).push(w); });
+  Object.keys(moved).forEach(function (t) {
+    const sh = data_().getSheetByName('T_' + t);
+    if (!sh) return;
+    const at = {};
+    keysOf_(sh).forEach(function (k, j) { at[String(k[0])] = j + 2; });
+    const nos = [];
+    moved[t].forEach(function (w) { const n = at[String(list[w.i][2])]; if (n) { w.rowNo = n; nos.push(n); } });
+    const got = rowsAt_(sh, nos);
+    Object.keys(got).forEach(function (n) { rows[t][n] = got[n]; });
+  });
   const out = [];
   let size = 0;
   let used = count;
@@ -1265,6 +1284,56 @@ function pull_(since, deviceId, forMain, who, limit) {
   }
   const next = used > 0 ? Number(list[used - 1][0]) || since : since;
   return { ok: true, records: out, next: next, more: start + used <= last, left: Math.max(0, last - (start + used) + 1), page: used };
+}
+
+// script 41: the two-way check (owner, 12 Nov: "all shows and nothing is left out – inwards and outwards"). A device
+// asks for a short fingerprint of every table it may hold (count + a sum of key|time); where its own differs it asks for
+// that table's keys and times, fetches what it lacks or holds an older copy of (sync_rows), and sends again what the
+// cloud lacks. Hidden tables of the device's role and the change history (non-admin) are left out, as in pull_.
+function syncTablesFor_(who) {
+  const hidden = hiddenFor_(who);
+  const ss = data_();
+  return KNOWN_TABLES.filter(function (t) { return !hidden[t] && !(t === 'audit_log' && !who.admin) && ss.getSheetByName('T_' + t); });
+}
+function syncFp_(pairs) {
+  let h = 0;
+  pairs.forEach(function (p) { const s = p[0] + '|' + String(p[1]).replace('T', ' ').slice(0, 19); for (let i = 0; i < s.length; i++) h = (h + s.charCodeAt(i) * (i + 1)) % 2147483647; });
+  return h;
+}
+function syncCheck_(who) {
+  const out = {};
+  syncTablesFor_(who).forEach(function (t) {
+    const pairs = keysOf_(data_().getSheetByName('T_' + t)).filter(function (k) { return k[0]; });
+    out[t] = { n: pairs.length, fp: syncFp_(pairs) };
+  });
+  return { ok: true, tables: out, at: new Date().toISOString() };
+}
+function syncKeys_(body, who) {
+  const t = String(body.t || '');
+  if (syncTablesFor_(who).indexOf(t) < 0) return { ok: false, error: 'Not for this device.' };
+  return { ok: true, t: t, keys: keysOf_(data_().getSheetByName('T_' + t)).filter(function (k) { return k[0]; }) };
+}
+function syncRows_(body, who) {
+  const t = String(body.t || '');
+  if (syncTablesFor_(who).indexOf(t) < 0) return { ok: false, error: 'Not for this device.' };
+  const want = {};
+  (Array.isArray(body.keys) ? body.keys : []).slice(0, 400).forEach(function (k) { want[String(k)] = true; });
+  const sh = data_().getSheetByName('T_' + t);
+  const at = [];
+  keysOf_(sh).forEach(function (k, j) { if (want[String(k[0])]) at.push(j + 2); });
+  const rows = rowsAt_(sh, at);
+  const out = [];
+  Object.keys(rows).forEach(function (n) {
+    const row = rows[n];
+    let parsed = {};
+    try { parsed = JSON.parse(row[4]); } catch (e) { parsed = {}; }
+    const vby = parsed && parsed._vby ? parsed._vby : null;
+    if (parsed) delete parsed._vby;
+    const rec = { t: t, k: String(row[0]), u: String(row[1]), d: String(row[2]), row: forDevice_(t, parsed, String(row[0]), who) };
+    if (vby) rec.vby = vby;
+    out.push(rec);
+  });
+  return { ok: true, records: out };
 }
 
 // 1.0.0 build 13: which logins' PINs this device may hold (admin device, its shop). When it changes the device asks
@@ -3730,6 +3799,7 @@ function histRoot_() {
   return null;
 }
 const HIST_INV_HEADER = ['key', 'file_id', 'shop', 'folder', 'file', 'url', 'supplier', 'tin', 'invoice_no', 'date', 'subtotal', 'vat', 'total', 'zero', 'status', 'why', 'by', 'at', 'model'];
+const HIST_LINE_HEADER = ['key', 'file_id', 'supplier', 'tin', 'date', 'code', 'description', 'qty', 'unit', 'unit_cost', 'vat_pct', 'at']; // script 40
 const HIST_Q_HEADER = ['file_id', 'shop', 'folder', 'file', 'url', 'mime', 'size', 'state', 'tries', 'at', 'why'];
 const HIST_SALES_HEADER = ['key', 'ym', 'shop', 'json', 'at', 'by'];
 const HIST_RUN_MS = 270000;              // a trigger may run 6 minutes; stop starting new work after 4½
@@ -3927,7 +3997,7 @@ function histPrompt_() {
     'You read scanned supplier invoices of a grocery business in Fiji (currency FJD) for its VAT records. The file may hold ONE or SEVERAL invoices (or a delivery note, receipt or credit note): give each invoice once.',
     'The BUYER is Easy Buys Shopping Centre (Easy Buys Shopping Center, Easy Buy, EBSC), TIN 50-14315-0-7, Lautoka. The buyer is NEVER the supplier.',
     'Fiji VAT was 15% until 31 July 2025 and is 12.5% from 1 August 2025; some goods are zero rated (VAT 0). VEP = excluding VAT, VIP = including VAT. VAT is an amount in dollars, never the percentage.',
-    'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Only the totals are needed, not the item lines. Do not take the SDC / VMS fiscal number as the invoice number.',
+    'Dates are day/month/year. Handwritten amounts may be written 18-00 meaning 18.00. Give the totals AND each item line (code, product name as printed, quantity, unit, the price of ONE unit BEFORE VAT after any discount, VAT %). Do not take the SDC / VMS fiscal number as the invoice number.',
     'Give numbers as plain numbers (no $ or commas); null for anything not on the invoice or not readable. If nothing can be read, give an empty list and say why in notes.',
   ].join('\n');
 }
@@ -3949,6 +4019,15 @@ function histSchema_() {
         credit_note: { type: 'BOOLEAN', nullable: true, description: 'true for a credit note / refund' },
         confidence: n('How sure you are of the figures, 0 to 1'),
         notes: s('Anything unclear'),
+        // script 40: the item lines too – each supplier's products and costs are paired in the app from them
+        lines: { type: 'ARRAY', nullable: true, items: { type: 'OBJECT', properties: {
+          code: s("The supplier's item code"),
+          description: { type: 'STRING', description: 'The product name as printed' },
+          qty: n('Quantity'),
+          unit: s('Unit: Each, Carton, Bag, Outer, Pkt, Kg …'),
+          unit_cost: n('Price of ONE unit BEFORE VAT and after any discount'),
+          vat_pct: n('VAT percent of the line: 12.5 standard, 0 zero rated or exempt'),
+        }, required: ['description'] } },
       } } },
       notes: s('Anything about the whole file: not an invoice, cannot be read, pages missing'),
     },
@@ -4019,6 +4098,16 @@ function histReadSome_(job, deadline, run) {
       r.status = chk.status; r.why = chk.why;
       if (chk.status === 'ok' || chk.status === 'check') seen[histDupKey_(r)] = q.file;
       iv.sh.appendRow(HIST_INV_HEADER.map(function (h) { return r[h] === null || r[h] === undefined ? '' : String(r[h]); }));
+      // script 40: the item lines of this invoice, written together
+      const ls = Array.isArray(x.lines) ? x.lines.filter(function (l) { return l && (l.description || l.code); }) : [];
+      if (ls.length && !x.credit_note) {
+        const lsh = sheet_('H_lines', HIST_LINE_HEADER);
+        const rows = ls.slice(0, 200).map(function (l, j) {
+          return [r.key + '#' + (j + 1), q.file_id, r.supplier, r.tin, r.date, String(l.code || '').slice(0, 40), String(l.description || '').slice(0, 120), histNum_(l.qty) === null ? '' : String(histNum_(l.qty)),
+            String(l.unit || '').slice(0, 20), histNum_(l.unit_cost) === null ? '' : String(histNum_(l.unit_cost)), histNum_(l.vat_pct) === null ? '' : String(histNum_(l.vat_pct)), now_()];
+        });
+        lsh.getRange(lsh.getLastRow() + 1, 1, rows.length, HIST_LINE_HEADER.length).setValues(rows);
+      }
     });
     mark('done', list.length + ' invoice(s)');
     done += 1;
@@ -4214,6 +4303,17 @@ function histClose_(body, who, open) {
   log_('History', [ym, open ? 'opened again' : 'closed', who && who.user ? who.user.name : '']);
   return { ok: true, closed: c[ym] || null };
 }
+// script 40: the item lines read from the old invoices, a page at a time (the app pairs each supplier's products).
+function histLines_(body) {
+  const after = Math.max(0, Math.floor(Number(body.after) || 0));
+  const sh = sheet_('H_lines', HIST_LINE_HEADER);
+  const last = sh.getLastRow() - 1;
+  if (last <= after) return { ok: true, lines: [], next: after, total: Math.max(0, last) };
+  const n = Math.min(1500, last - after);
+  const vals = sh.getRange(after + 2, 1, n, HIST_LINE_HEADER.length).getValues();
+  const lines = vals.map(function (v) { const o = {}; HIST_LINE_HEADER.forEach(function (h, j) { o[h] = v[j] === undefined ? '' : v[j]; }); return o; });
+  return { ok: true, lines: lines, next: after + n, total: last };
+}
 function histRoute_(body, who) {
   const what = 'The invoices from before the app';
   const need = needOwner_(who, body, what);
@@ -4224,6 +4324,7 @@ function histRoute_(body, who) {
     case 'hist_pause': return histPause_(true);
     case 'hist_resume': return histPause_(false);
     case 'hist_status': return histStatus_();
+    case 'hist_lines': return histLines_(body);
     case 'hist_read': { const r = histRunNow_(Date.now() + HIST_PAGE_MS); const st = histStatus_(); st.did = r.did || null; st.skipped = r.skipped || ''; return st; }
     case 'hist_months': return histMonths_();
     case 'hist_month': return histMonth_(body.ym);
@@ -4247,7 +4348,7 @@ function histRoute_(body, who) {
 const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'delivery_save', 'customer_email', 'pack_email',
   'support_email', 'viber', 'viber_setup', 'myday_events', 'myday_out', 'calendar', 'fccc_lpg', 'setup_pack', 'tidy_records', 'snapshot',
   'backup', 'backup_part', 'backup_done', 'backup_list', 'backup_get', 'backup_get_part', 'problem_log', 'problem_log_get',
-  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen', 'hist_read'];
+  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen', 'hist_read', 'hist_lines'];
 // The Cloudflare cloud checks the device and its login here before asking Google for a Google-only request.
 function authOnly_(body) {
   REQ_ = {};
