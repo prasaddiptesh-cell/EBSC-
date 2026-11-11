@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 34;                // 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 37;                // 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -137,8 +137,11 @@ function doPost(e) {
     // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
     if (body.kind === 'email_login_start') return json_(emailLoginStart_(body));
     if (body.kind === 'email_login_finish') return json_(emailLoginFinish_(body));
+    if (body.kind === 'web_code') return json_(webCode_(body)); // script 35: the website (email code → PIN)
+    if (body.kind === 'web_join') return json_(webJoin_(body)); // script 35: the website
     const who = auth_(body);
     if (!who.ok) return json_({ ok: false, error: who.error, blocked: !!who.blocked, waiting: !!who.waiting, lock: who.lock || null, wipe: !!who.wipe, removed: !!who.removed });
+    if (body.kind === 'key_to_token') return json_(keyToToken_(body, who)); // script 35: the main tablet gets its own pass
     // Only now (a known device): housekeeping that writes settings.
     try { viberUnshare_(); } catch (x) { /* never stops a request */ }
     // 1.0.0 build 1 (script 12): PINs in the cloud copy are hashed once (and every PIN that arrives is hashed).
@@ -1655,6 +1658,12 @@ function gate_(id, d) {
     if (c.until > nowIso) { c.attempts = [{ at: nowIso, why: 'suspended' }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS); ctlSaveSafe_(all); return { ok: false, lock: { kind: 'suspended', until: c.until }, error: 'Access paused by the owner until ' + c.until.slice(0, 16).replace('T', ' ') + '.' }; }
     delete c.until; hist_(c, 'Pause ended', 'cloud'); ctlSaveSafe_(all);
   }
+  if (c.web && Number(c.web.until) && Date.now() > Number(c.web.until)) {
+    // script 35: a website login runs out after WEB_HOURS: the browser logs in again (email + password + code)
+    if (d && d.sh && String(d.v[4] || '')) { d.sh.getRange(d.row, 4, 1, 2).setValues([['removed', '']]); devicesChanged_(); }
+    c.removedAt = nowIso; hist_(c, 'Website login ran out', 'cloud'); ctlSaveSafe_(all);
+    return { ok: false, removed: true, webExpired: true, error: 'Your website login has run out – log in again with your email.' };
+  }
   if (c.endDate && c.endDate < nowIso.slice(0, 10)) {
     c.attempts = [{ at: nowIso, why: 'ended' }].concat(c.attempts || []).slice(0, CTL_ATTEMPTS); ctlSaveSafe_(all);
     return { ok: false, lock: { kind: 'ended', until: c.endDate }, error: 'Access for this device ended on ' + c.endDate + '.' };
@@ -2835,40 +2844,137 @@ function userByEmail_(email) {
 }
 function limited_(cache, key, max, secs) { const n = Number(cache.get(key) || '0'); if (n >= max) return true; cache.put(key, String(n + 1), secs); return false; }
 const EMAIL_SAME = 'If this email may log in, a code has been sent to it.';
-const EMAIL_FAIL = 'The email, password or code is not right (or the code is too old). Try again.';
+const EMAIL_FAIL = 'That code is not right or is too old – tap "send a new code" and use the newest email.';
+// script 37: login codes and website tickets kept in the script properties (a few minutes) – the new cloud's quick
+// cache is lost whenever it restarts, which made a correct code "too old" a minute later.
+function tcGet_(k) { const p = props_(); const v = p.getProperty('TC_' + k); if (!v) return null; try { const o = JSON.parse(v); if (!(o.until > Date.now())) { p.deleteProperty('TC_' + k); return null; } return o.v; } catch (e) { return null; } }
+function tcPut_(k, v, secs) { if (v === 'null') { props_().deleteProperty('TC_' + k); return; } props_().setProperty('TC_' + k, JSON.stringify({ v: String(v), until: Date.now() + 1000 * Math.max(1, Number(secs) || 300) })); }
 function emailLoginStart_(body) {
   const cache = CacheService.getScriptCache();
   const e = String(body.email || '').trim().toLowerCase();
   if (limited_(cache, 'el_c_' + caller_(body), 10, 3600) || limited_(cache, 'el_e_' + sha_(e).slice(0, 20), 3, 900)) return { ok: true, message: EMAIL_SAME };
   if (!emailOn_()) return { ok: true, message: EMAIL_SAME };
   const u = userByEmail_(e);
-  if (!u || String(u.active) === '0' || !props_().getProperty('PW_' + u.uid)) return { ok: true, message: EMAIL_SAME };
+  if (!u || String(u.active) === '0' || (!body.web && !props_().getProperty('PW_' + u.uid))) return { ok: true, message: EMAIL_SAME };
   const code = String(100000 + Math.floor(Math.random() * 900000));
-  cache.put('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
+  tcPut_('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
   mailEssential_({ to: e, subject: 'Easy Buys login code', body: 'Your Easy Buys login code is ' + code + '. It works for 5 minutes. If you did not ask for it, tell the owner.', name: 'Easy Buys' });
   return { ok: true, message: EMAIL_SAME };
 }
-function emailLoginFinish_(body) {
+// script 35: the device that signs in with the master cloud key (the first "main tablet") gets its own pass, like every
+// other device, so the master key is no longer needed day to day. Only a device that proved it holds the key.
+function keyToToken_(body, who) {
+  if (!who.viaKey) return { ok: false, error: 'Only a device using the cloud key can ask for this.' };
+  const id = String(who.deviceId || '');
+  if (!/^[A-Za-z0-9._:-]{3,80}$/.test(id) || id === 'first-device') return { ok: false, error: 'Device id missing.' };
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return busyReply_();
+  REQ_.locked = (REQ_.locked || 0) + 1;
+  try {
+    const d = findDevice_(function (r) { return String(r[0]) === id; });
+    if (d) { d.sh.getRange(d.row, 4, 1, 2).setValues([['active', sha_(token)]]); devicesChanged_(); }
+    else touchDevice_(body, id, { status: 'active', tokenHash: sha_(token), note: 'main tablet – own pass instead of the cloud key' });
+    const all = ctlAll_(); const c = ctl_(all, id);
+    c.admin = true; if (!c.role) c.role = 'owner';
+    hist_(c, 'Own pass instead of the cloud key', 'cloud');
+    ctlSave_(all);
+  } finally { lock.releaseLock(); REQ_.locked -= 1; }
+  log_('Device', [id, 'own pass instead of the cloud key']);
+  return { ok: true, token: token };
+}
+// script 35: the website. A browser on a computer joins with the person's login email (a code emailed to them,
+// 5 minutes, 5 tries) AND their own PIN (checked here, 5 tries) – no invite and no phone needed. It becomes a device of the person's
+// role for WEB_HOURS (12) hours, then it must log in again; the owner gets an email for every browser that logs in,
+// and sees / removes it in Admin › Devices like any other device.
+const WEB_HOURS = 12;
+const WEB_ROLE = { owner: 'owner', admin: 'owner', manager: 'manager', supervisor: 'manager' };
+function webCode_(body) {
+  const chk = emailCheck_(body, 'web');
+  if (!chk.ok) return chk;
+  const u = chk.user;
+  if (!props_().getProperty('PV_' + u.uid)) return { ok: false, error: 'Your PIN has not reached the cloud yet – log in once on a phone or tablet, then try again.' };
+  const ticket = Utilities.getUuid().replace(/-/g, '');
+  tcPut_('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
+  return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || ''), role: String(u.role || '') };
+}
+function webJoin_(body) {
+  const d = body.device || {};
+  // script 36: phones and tablets log in the same way (email code + PIN) – no QR codes or invites needed
+  const isWeb = /^web-/.test(String(d.id || ''));
+  if (!d.id || !(isWeb ? /^web-[A-Za-z0-9._:-]{6,80}$/ : /^[A-Za-z0-9._:-]{3,80}$/).test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
+  const cache = CacheService.getScriptCache();
+  const tk = 'web_t_' + String(body.ticket || '').replace(/[^a-f0-9]/gi, '').slice(0, 40);
+  let t = null;
+  try { t = JSON.parse(tcGet_(tk) || 'null'); } catch (x) { t = null; }
+  if (!t || !t.uid) return { ok: false, error: 'The login took too long – start again with your email.' };
+  if (!proofOk_(t.uid, body.proof)) {
+    t.tries = (t.tries || 0) + 1;
+    failCount_('email', t.email, { person: t.email, what: '5 wrong PINs on the website' });
+    if (t.tries >= 5) { tcPut_(tk, 'null', 1); return { ok: false, error: 'Wrong PIN 5 times – start again with your email.' }; }
+    tcPut_(tk, JSON.stringify(t), 300);
+    return { ok: false, error: 'Wrong PIN.' };
+  }
+  tcPut_(tk, 'null', 1);
+  const u = cloudUser_(t.uid);
+  if (!u || String(u.active) === '0') return { ok: false, error: EMAIL_FAIL };
+  u.uid = t.uid;
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return busyReply_();
+  REQ_.locked = (REQ_.locked || 0) + 1;
+  try {
+    const existing = findDevice_(function (r) { return String(r[0]) === String(d.id); });
+    const kind = isWeb ? 'web' : (String(d.kind) === 'phone' ? 'phone' : 'tablet');
+    const name = isWeb ? 'Website – ' + String(u.name || u.email || 'browser').slice(0, 40) + (d.name ? ' (' + String(d.name).slice(0, 40) + ')' : '') : String(d.name || (String(u.name || '') + ' ' + kind)).slice(0, 60);
+    if (existing) { existing.sh.getRange(existing.row, 2, 1, 4).setValues([[name, kind, 'active', sha_(token)]]); devicesChanged_(); }
+    else touchDevice_({ device: { name: name, kind: kind }, app: body.app }, String(d.id), { status: 'active', tokenHash: sha_(token), invitedBy: 'email:' + u.uid, note: isWeb ? 'website login' : 'email + PIN login' });
+    const all = ctlAll_(); const c = ctl_(all, String(d.id));
+    delete c.removedAt; delete c.until; delete c.endDate; delete c.shop;
+    c.role = WEB_ROLE[String(u.role || '')] || 'staff';
+    // the owner / an admin setting up a shared device: a shop tablet or the bakery tablet (staff use their PINs on it)
+    const shared = String(body.shared || '');
+    if (!isWeb && c.role === 'owner' && /^(S\d{1,2}|bakery)$/.test(shared)) { c.role = shared === 'bakery' ? 'bakery' : 'staff'; if (shared !== 'bakery') c.shop = shared; }
+    if (isWeb) c.web = { uid: u.uid, until: Date.now() + WEB_HOURS * 3600000 }; else delete c.web;
+    if (c.role === 'owner') c.admin = true; else delete c.admin;
+    hist_(c, 'Website login (' + String(u.name || '') + ', ' + c.role + ')', 'email');
+    ctlSave_(all);
+  } finally {
+    lock.releaseLock();
+    REQ_.locked -= 1;
+  }
+  secEvent_('device', { device: String(d.id), what: (isWeb ? 'A browser logged in to the Easy Buys website' : 'A ' + (String(d.kind) === 'phone' ? 'phone' : 'tablet') + ' joined Easy Buys') + ' as ' + String(u.name || u.email || u.uid) + (body.shared ? ' (set up as ' + String(body.shared) + ')' : '') + (body.where ? ' (' + String(body.where).slice(0, 80) + ')' : '') + '. If this was not you or your staff, remove it in Admin › Devices and change that person\'s PIN.' });
+  log_('Website login', [u.uid, String(d.id)]);
+  return { ok: true, token: token, approved: true, role: String(u.role || ''), until: isWeb ? new Date(Date.now() + WEB_HOURS * 3600000).toISOString() : '', uid: u.uid };
+}
+// The email + password + emailed code check, shared by the dashboard's email login and the website (script 35).
+function emailCheck_(body, what) {
   const cache = CacheService.getScriptCache();
   const e = String(body.email || '').trim().toLowerCase();
   const ck = 'el_code_' + sha_(e).slice(0, 20);
   if (limited_(cache, 'el_f_' + caller_(body), 20, 3600)) return { ok: false, error: EMAIL_FAIL };
   if (!emailOn_()) return { ok: false, error: EMAIL_FAIL };
   let c = null;
-  try { c = JSON.parse(cache.get(ck) || 'null'); } catch (x) { c = null; }
+  try { c = JSON.parse(tcGet_(ck) || 'null'); } catch (x) { c = null; }
   if (!c || !(c.exp > Date.now()) || c.tries >= 5) { failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' }); return { ok: false, error: EMAIL_FAIL }; }
   const u = userByEmail_(e);
   const pw = u ? props_().getProperty('PW_' + u.uid) : null;
   const codeOk = c.h === sha_(secret_('PIN_PEPPER') + ':' + String(body.code || '').trim());
-  let passOk = false;
-  if (pw) { const parts = pw.split(':'); passOk = parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(body.password || ''), parts[1], Number(parts[0]) || PIN_ITER) === parts[2]; }
+  let passOk = what === 'web'; // the website: the emailed code here, the person's PIN next (webJoin_)
+  if (pw && what !== 'web') { const parts = pw.split(':'); passOk = parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(body.password || ''), parts[1], Number(parts[0]) || PIN_ITER) === parts[2]; }
   if (!u || String(u.active) === '0' || !codeOk || !passOk) {
     failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' });
     c.tries += 1;
-    if (c.tries >= 5) cache.put(ck, 'null', 1); else cache.put(ck, JSON.stringify(c), Math.max(1, Math.round((c.exp - Date.now()) / 1000)));
+    if (c.tries >= 5) tcPut_(ck, 'null', 1); else tcPut_(ck, JSON.stringify(c), Math.max(1, Math.round((c.exp - Date.now()) / 1000)));
     return { ok: false, error: EMAIL_FAIL };
   }
-  cache.put(ck, 'null', 1);
+  tcPut_(ck, 'null', 1);
+  return { ok: true, user: u };
+}
+function emailLoginFinish_(body) {
+  const chk = emailCheck_(body, 'dashboard');
+  if (!chk.ok) return chk;
+  const u = chk.user;
   const token = Utilities.getUuid() + Utilities.getUuid();
   const all = sessionsAll_();
   const until = Date.now() + 12 * 3600000;
@@ -4126,6 +4232,9 @@ function relayExport_(x) {
     const rows = from > last || !cols ? [] : sh.getRange(from, 1, Math.min(n, last - from + 1), cols).getValues().map(function (r) { return r.map(text_); });
     return { ok: true, name: sh.getName(), from: from, rows: rows, last: last, more: from + rows.length <= last };
   }
+  // script 35: the main tablet's cloud key (kept at the top of this program on Google, not in the properties) –
+  // asked once by the new cloud, which keeps it in its own properties
+  if (x.what === 'apikey') { const k = apiKey_(); return k && k.indexOf('PASTE') !== 0 ? { ok: true, key: k } : { ok: false, error: 'No cloud key in the Google program.' }; }
   if (x.what === 'props') {
     const p = PropertiesService.getScriptProperties();
     const all = p.getProperties ? p.getProperties() : {};
@@ -4165,3 +4274,8 @@ function hiddenFor_(who) {
   if (r && !(who && who.admin)) r.hide.forEach(function (t) { out[t] = true; });
   return out;
 }
+
+// script 35: the move to Cloudflare, by hand in the editor (choose the function, ▶ Run).
+// moveOn: devices go to the new cloud; moveOff: everything goes back to this Google cloud.
+function moveOn() { PropertiesService.getScriptProperties().setProperty('CLOUD_MOVE_TO', 'https://easybuys-cloud.easybuys.workers.dev'); }
+function moveOff() { PropertiesService.getScriptProperties().deleteProperty('CLOUD_MOVE_TO'); }
