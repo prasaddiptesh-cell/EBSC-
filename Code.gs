@@ -137,6 +137,7 @@ function doPost(e) {
     // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
     if (body.kind === 'email_login_start') return json_(emailLoginStart_(body));
     if (body.kind === 'email_login_finish') return json_(emailLoginFinish_(body));
+    if (body.kind === 'web_code') return json_(webCode_(body)); // script 35: the website (email code → PIN)
     if (body.kind === 'web_join') return json_(webJoin_(body)); // script 35: the website
     const who = auth_(body);
     if (!who.ok) return json_({ ok: false, error: who.error, blocked: !!who.blocked, waiting: !!who.waiting, lock: who.lock || null, wipe: !!who.wipe, removed: !!who.removed });
@@ -2850,7 +2851,7 @@ function emailLoginStart_(body) {
   if (limited_(cache, 'el_c_' + caller_(body), 10, 3600) || limited_(cache, 'el_e_' + sha_(e).slice(0, 20), 3, 900)) return { ok: true, message: EMAIL_SAME };
   if (!emailOn_()) return { ok: true, message: EMAIL_SAME };
   const u = userByEmail_(e);
-  if (!u || String(u.active) === '0' || !props_().getProperty('PW_' + u.uid)) return { ok: true, message: EMAIL_SAME };
+  if (!u || String(u.active) === '0' || (!body.web && !props_().getProperty('PW_' + u.uid))) return { ok: true, message: EMAIL_SAME };
   const code = String(100000 + Math.floor(Math.random() * 900000));
   cache.put('el_code_' + sha_(e).slice(0, 20), JSON.stringify({ h: sha_(secret_('PIN_PEPPER') + ':' + code), exp: Date.now() + 5 * 60000, tries: 0 }), 300);
   mailEssential_({ to: e, subject: 'Easy Buys login code', body: 'Your Easy Buys login code is ' + code + '. It works for 5 minutes. If you did not ask for it, tell the owner.', name: 'Easy Buys' });
@@ -2878,18 +2879,40 @@ function keyToToken_(body, who) {
   log_('Device', [id, 'own pass instead of the cloud key']);
   return { ok: true, token: token };
 }
-// script 35: the website. A browser on a computer joins with the person's own email login (their password AND a
-// code emailed to them, 5 minutes, 5 tries) – no invite and no phone needed. It becomes a device of the person's
+// script 35: the website. A browser on a computer joins with the person's login email (a code emailed to them,
+// 5 minutes, 5 tries) AND their own PIN (checked here, 5 tries) – no invite and no phone needed. It becomes a device of the person's
 // role for WEB_HOURS (12) hours, then it must log in again; the owner gets an email for every browser that logs in,
 // and sees / removes it in Admin › Devices like any other device.
 const WEB_HOURS = 12;
 const WEB_ROLE = { owner: 'owner', admin: 'owner', manager: 'manager', supervisor: 'manager' };
-function webJoin_(body) {
-  const d = body.device || {};
-  if (!d.id || !/^web-[A-Za-z0-9._:-]{6,80}$/.test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
+function webCode_(body) {
   const chk = emailCheck_(body, 'web');
   if (!chk.ok) return chk;
   const u = chk.user;
+  if (!props_().getProperty('PV_' + u.uid)) return { ok: false, error: 'Your PIN has not reached the cloud yet – log in once on a phone or tablet, then try again.' };
+  const ticket = Utilities.getUuid().replace(/-/g, '');
+  CacheService.getScriptCache().put('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
+  return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || '') };
+}
+function webJoin_(body) {
+  const d = body.device || {};
+  if (!d.id || !/^web-[A-Za-z0-9._:-]{6,80}$/.test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
+  const cache = CacheService.getScriptCache();
+  const tk = 'web_t_' + String(body.ticket || '').replace(/[^a-f0-9]/gi, '').slice(0, 40);
+  let t = null;
+  try { t = JSON.parse(cache.get(tk) || 'null'); } catch (x) { t = null; }
+  if (!t || !t.uid) return { ok: false, error: 'The login took too long – start again with your email.' };
+  if (!proofOk_(t.uid, body.proof)) {
+    t.tries = (t.tries || 0) + 1;
+    failCount_('email', t.email, { person: t.email, what: '5 wrong PINs on the website' });
+    if (t.tries >= 5) { cache.put(tk, 'null', 1); return { ok: false, error: 'Wrong PIN 5 times – start again with your email.' }; }
+    cache.put(tk, JSON.stringify(t), 300);
+    return { ok: false, error: 'Wrong PIN.' };
+  }
+  cache.put(tk, 'null', 1);
+  const u = cloudUser_(t.uid);
+  if (!u || String(u.active) === '0') return { ok: false, error: EMAIL_FAIL };
+  u.uid = t.uid;
   const token = Utilities.getUuid() + Utilities.getUuid();
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return busyReply_();
@@ -2927,8 +2950,8 @@ function emailCheck_(body, what) {
   const u = userByEmail_(e);
   const pw = u ? props_().getProperty('PW_' + u.uid) : null;
   const codeOk = c.h === sha_(secret_('PIN_PEPPER') + ':' + String(body.code || '').trim());
-  let passOk = false;
-  if (pw) { const parts = pw.split(':'); passOk = parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(body.password || ''), parts[1], Number(parts[0]) || PIN_ITER) === parts[2]; }
+  let passOk = what === 'web'; // the website: the emailed code here, the person's PIN next (webJoin_)
+  if (pw && what !== 'web') { const parts = pw.split(':'); passOk = parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(body.password || ''), parts[1], Number(parts[0]) || PIN_ITER) === parts[2]; }
   if (!u || String(u.active) === '0' || !codeOk || !passOk) {
     failCount_('email', e, { person: e, what: '5 wrong email logins in 10 minutes' });
     c.tries += 1;
