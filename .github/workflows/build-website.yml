@@ -31,14 +31,17 @@ jobs:
           #  1. with Atomics.pause (new Chrome) a call gave up after a few milliseconds ("Sync operation timeout")
           #  2. the answer's length was written as ONE byte (answers longer than 255 characters came back cut off:
           #     "Unterminated string in JSON")
-          #  3. room for bigger answers (1 MB → 4 MB), and a clear error instead of a crash when one is bigger still
+          #  3. room for bigger answers (1 MB → 8 MB, one buffer kept for every call), and a clear error instead of a crash when one is bigger still
           python3 - <<'PY'
           p = 'node_modules/expo-sqlite/web/WorkerChannel.ts'
           s = open(p).read()
           rep = [
             ("if (i > 1_000_000) {", "if (i > 3_000_000_000) {"),
             ("resultArray.set(new Uint32Array([length]), 0);", "new Uint32Array(resultBuffer, 0, 1)[0] = length;"),
-            ("const resultBuffer = new SharedArrayBuffer(1024 * 1024);", "const resultBuffer = new SharedArrayBuffer(4 * 1024 * 1024);"),
+            # one shared buffer for every call (a new 4 MB buffer per call ran a phone out of memory: "RangeError")
+            ("let hasWarnedSync = false;", "let hasWarnedSync = false;\nlet SYNC_LOCK: SharedArrayBuffer | null = null;\nlet SYNC_RESULT: SharedArrayBuffer | null = null;"),
+            ("const lockBuffer = new SharedArrayBuffer(4);", "const lockBuffer = SYNC_LOCK || (SYNC_LOCK = new SharedArrayBuffer(4));"),
+            ("const resultBuffer = new SharedArrayBuffer(1024 * 1024);", "const resultBuffer = SYNC_RESULT || (SYNC_RESULT = new SharedArrayBuffer(8 * 1024 * 1024));"),
             ("    const resultBytes = new TextEncoder().encode(resultJson);",
              "    let resultBytes = new TextEncoder().encode(resultJson);\n    if (resultBytes.length + 4 > resultBuffer.byteLength) resultBytes = new TextEncoder().encode(serialize({ error: 'The answer is too big for the browser (' + resultBytes.length + ' bytes)' }));"),
           ]
