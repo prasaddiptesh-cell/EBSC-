@@ -119,6 +119,6 @@ jobs:
               open) echo "== open (devices welcome from now; no more imports)"; ask cf_open | jq -c . ;;
               send) echo "== send"; ask cf_send | jq -c . ;;
               tenants) echo "== businesses"; curl -s -m 60 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"tenant_list\",\"providerKey\":\"$PROVIDER_KEY\"}" "$URL/provider" | jq -c . ;;
-              status) echo "== status"; sleep 70; ask cf_status | tee /tmp/st.txt | head -1 | jq -c '{ok, error, version, refused, waitingForGoogle, imported, open, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}' ;;
+              status) echo "== status"; sleep 70; ask cf_status | tee /tmp/st.txt | head -1 | jq -c '{ok, error, version, refused, waitingForGoogle, imported, open, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}'; tail -1 /tmp/st.txt ;;
             esac
           done
