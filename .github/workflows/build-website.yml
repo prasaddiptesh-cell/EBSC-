@@ -75,6 +75,8 @@ jobs:
           mkdir -p /tmp/wc && cp .github/tools/webcheck.mjs /tmp/wc/ && cd /tmp/wc
           npm init -y >/dev/null && npm i --no-audit --no-fund playwright@1 >/dev/null 2>&1 && npx playwright install --with-deps chromium >/dev/null 2>&1
           node webcheck.mjs || true
+          echo '--- as a phone (Chrome on Android, 384 wide)'
+          WEB_PHONE=1 node webcheck.mjs || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

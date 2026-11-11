@@ -2,7 +2,8 @@
 import { chromium } from 'playwright';
 const url = process.env.WEB_URL || 'https://easybuys-web.easybuys.workers.dev';
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+const phone = process.env.WEB_PHONE === '1';
+const page = await browser.newPage(phone ? { viewport: { width: 384, height: 832 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3, userAgent: 'Mozilla/5.0 (Linux; Android 16; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36' } : { viewport: { width: 1280, height: 860 } });
 const log = [];
 page.on('console', (m) => log.push(`console.${m.type()}: ${m.text()}`.slice(0, 400)));
 page.on('pageerror', (e) => log.push(`PAGE ERROR: ${String(e && e.stack || e).slice(0, 1500)}`));
@@ -11,7 +12,7 @@ const res = await page.goto(url, { waitUntil: 'load', timeout: 60000 });
 log.push(`status ${res && res.status()} headers coop=${res && res.headers()['cross-origin-opener-policy']} coep=${res && res.headers()['cross-origin-embedder-policy']}`);
 log.push(`crossOriginIsolated=${await page.evaluate(() => self.crossOriginIsolated)}`);
 await page.waitForTimeout(20000);
-await page.screenshot({ path: 'shot1.png' });
+await page.screenshot({ path: phone ? 'shot-phone.png' : 'shot1.png' });
 const text = await page.evaluate(() => document.body.innerText.slice(0, 1500));
 log.push('TEXT: ' + text.replace(/\n+/g, ' | '));
 console.log(log.join('\n'));
