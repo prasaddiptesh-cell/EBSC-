@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 38;                // 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 39;                // 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -3734,6 +3734,8 @@ const HIST_Q_HEADER = ['file_id', 'shop', 'folder', 'file', 'url', 'mime', 'size
 const HIST_SALES_HEADER = ['key', 'ym', 'shop', 'json', 'at', 'by'];
 const HIST_RUN_MS = 270000;              // a trigger may run 6 minutes; stop starting new work after 4½
 const HIST_LIST_MS = 60000;               // script 29: finding files, per run, before reading
+const HIST_PAR = 6;                       // script 39: invoices read at the same time (one request each, sent together)
+const HIST_PAGE_MS = 80000;               // script 39: one round from the app's page (the page asks again when it is done)
 const HIST_FILE_MS = 75000;              // one reading takes up to about a minute
 const HIST_MAX_BYTES = 14 * 1024 * 1024; // base64 grows a third; Gemini takes about 20 MB
 // Fiji VAT: 15% until 31 July 2025, 12.5% from 1 August 2025 (FRCS).
@@ -3954,6 +3956,36 @@ function histSchema_() {
   };
 }
 // Reads files from the queue until the time is up. → how many files were read.
+// script 39: several files read at the same time – one request each to the first model, sent together. A file whose
+// request did not come back right is null (read on its own afterwards, with the usual fallbacks).
+function aiReadMany_(items, opts) {
+  const key = String(PropertiesService.getScriptProperties().getProperty('GEMINI_KEY') || '').trim();
+  if (!key || !items.length) return items.map(function () { return null; });
+  const model = aiModels_()[0];
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key);
+  const gc = function () {
+    const g = { temperature: 0, responseMimeType: 'application/json', responseSchema: opts.schema };
+    g.thinkingConfig = /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: 'low' };
+    return g;
+  };
+  const reqs = items.map(function (it) {
+    return { url: url, method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      payload: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: opts.prompt }, { inline_data: { mime_type: it.mime, data: it.data } }] }], generationConfig: gc() }) };
+  });
+  let resps = [];
+  try { resps = UrlFetchApp.fetchAll(reqs); } catch (e) { return items.map(function () { return null; }); }
+  return resps.map(function (res) {
+    try {
+      const code = res.getResponseCode();
+      const json = JSON.parse(res.getContentText());
+      if (code === 429) return { ok: false, limit: true, error: 'AI_ERROR: the free AI limit is used up for now – try again later.' };
+      if (code !== 200) return null;
+      const cand = json && json.candidates && json.candidates[0];
+      const out = ((cand && cand.content && cand.content.parts) || []).map(function (p) { return p.text || ''; }).join('').trim();
+      return { ok: true, invoice: JSON.parse(out.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')), model: model };
+    } catch (e) { return null; }
+  });
+}
 function histReadSome_(job, deadline, run) {
   const qq = histRows_('H_queue', HIST_Q_HEADER);
   const iv = histRows_('H_invoices', HIST_INV_HEADER);
@@ -3962,23 +3994,14 @@ function histReadSome_(job, deadline, run) {
   let done = 0;
   const todo = qq.rows.filter(function (r) { return !r.state || r.state === 'retry'; })
     .sort(function (a, b) { return String(b.folder || '') < String(a.folder || '') ? -1 : String(b.folder || '') > String(a.folder || '') ? 1 : 0; }); // script 29: newest month first
-  for (let i = 0; i < todo.length; i++) {
-    if (Date.now() + HIST_FILE_MS > deadline) break;
-    const q = todo[i];
-    const tries = (Number(q.tries) || 0) + 1;
-    const mark = function (state, why) { qq.sh.getRange(q._row, 8, 1, 4).setValues([[state, String(tries), now_(), String(why || '').slice(0, 200)]]); };
-    let file;
-    try { file = DriveApp.getFileById(q.file_id); } catch (e) { mark('failed', 'The file is gone or not shared.'); histOpen_(iv, q, 'The file could not be opened (gone or not shared).'); continue; }
-    const size = Number(q.size) || (file.getSize ? file.getSize() : 0);
-    if (size > HIST_MAX_BYTES) { mark('too_big', 'Too big to read'); histOpen_(iv, q, 'The file is too big for the reader (' + Math.round(size / 1048576) + ' MB) – enter it by hand.'); done += 1; continue; }
-    const blob = file.getBlob();
-    const data = Utilities.base64Encode(blob.getBytes());
-    const res = aiReadInvoice_([{ mimeType: /pdf/i.test(q.mime) ? 'application/pdf' : 'image/jpeg', data: data }], {}, { prompt: histPrompt_(), schema: histSchema_() });
+  const opts = { prompt: histPrompt_(), schema: histSchema_() };
+  // what one file's reading gives: its invoices kept, or why not
+  const take = function (q, tries, mark, res) {
     if (!res.ok) {
-      if (res.code === 'NO_AI_KEY') { run.error = res.error; break; }
-      if (/limit is used up/i.test(res.error)) { run.error = 'The free AI limit is used up for today – reading carries on by itself later.'; run.wait_until = new Date(Date.now() + 3600000).toISOString(); break; }
-      if (tries < 3) { mark('retry', res.error); continue; }
-      mark('failed', res.error); histOpen_(iv, q, 'Could not be read: ' + String(res.error).replace(/^AI_ERROR:\s*/, '')); done += 1; continue;
+      if (res.code === 'NO_AI_KEY') { run.error = res.error; return 'stop'; }
+      if (res.limit || /limit is used up/i.test(res.error)) { run.error = 'The free AI limit is used up for today – reading carries on by itself later.'; run.wait_until = new Date(Date.now() + 3600000).toISOString(); mark('retry', res.error); return 'stop'; }
+      if (tries < 3) { mark('retry', res.error); return 'next'; }
+      mark('failed', res.error); histOpen_(iv, q, 'Could not be read: ' + String(res.error).replace(/^AI_ERROR:\s*/, '')); done += 1; return 'next';
     }
     const list = (res.invoice && Array.isArray(res.invoice.invoices)) ? res.invoice.invoices : [];
     if (!list.length) histOpen_(iv, q, 'No invoice could be read in it' + (res.invoice && res.invoice.notes ? ': ' + res.invoice.notes : '.'));
@@ -3999,6 +4022,40 @@ function histReadSome_(job, deadline, run) {
     });
     mark('done', list.length + ' invoice(s)');
     done += 1;
+    return 'next';
+  };
+  let i = 0;
+  while (i < todo.length) {
+    if (Date.now() + HIST_FILE_MS > deadline) break;
+    // script 39: a round of up to HIST_PAR files, read at the same time
+    const batch = [];
+    while (i < todo.length && batch.length < HIST_PAR) {
+      const q = todo[i]; i += 1;
+      const tries = (Number(q.tries) || 0) + 1;
+      const mark = (function (qr, t) { return function (state, why) { qq.sh.getRange(qr._row, 8, 1, 4).setValues([[state, String(t), now_(), String(why || '').slice(0, 200)]]); }; })(q, tries);
+      let file;
+      try { file = DriveApp.getFileById(q.file_id); } catch (e) { mark('failed', 'The file is gone or not shared.'); histOpen_(iv, q, 'The file could not be opened (gone or not shared).'); continue; }
+      const size = Number(q.size) || (file.getSize ? file.getSize() : 0);
+      if (size > HIST_MAX_BYTES) { mark('too_big', 'Too big to read'); histOpen_(iv, q, 'The file is too big for the reader (' + Math.round(size / 1048576) + ' MB) – enter it by hand.'); done += 1; continue; }
+      let data = '';
+      try { data = Utilities.base64Encode(file.getBlob().getBytes()); } catch (e) { mark('retry', 'Could not open the file just now.'); continue; }
+      batch.push({ q: q, tries: tries, mark: mark, mime: /pdf/i.test(q.mime) ? 'application/pdf' : 'image/jpeg', data: data });
+    }
+    if (!batch.length) continue;
+    const many = aiReadMany_(batch, opts);
+    let stop = false;
+    for (let k = 0; k < batch.length; k++) {
+      const b = batch[k];
+      let res = many[k];
+      if (!res) {
+        // not right in the round: on its own, with the other models – when there is time; otherwise next run
+        if (stop || Date.now() > deadline) { b.mark('retry', 'Read again in the next round.'); continue; }
+        res = aiReadInvoice_([{ mimeType: b.mime, data: b.data }], {}, opts);
+      }
+      if (stop) { b.mark('retry', 'Read again in the next round.'); continue; }
+      if (take(b.q, b.tries, b.mark, res) === 'stop') stop = true;
+    }
+    if (stop) break;
   }
   return done;
 }
@@ -4167,6 +4224,7 @@ function histRoute_(body, who) {
     case 'hist_pause': return histPause_(true);
     case 'hist_resume': return histPause_(false);
     case 'hist_status': return histStatus_();
+    case 'hist_read': { const r = histRunNow_(Date.now() + HIST_PAGE_MS); const st = histStatus_(); st.did = r.did || null; st.skipped = r.skipped || ''; return st; }
     case 'hist_months': return histMonths_();
     case 'hist_month': return histMonth_(body.ym);
     case 'hist_fix': return histFix_(body, who);
@@ -4189,7 +4247,7 @@ function histRoute_(body, who) {
 const RELAY_KINDS = ['push', 'photo', 'file_put', 'file_get', 'ocr', 'invoice_ai', 'report', 'po', 'email', 'payslip_save', 'payslip_email', 'delivery_save', 'customer_email', 'pack_email',
   'support_email', 'viber', 'viber_setup', 'myday_events', 'myday_out', 'calendar', 'fccc_lpg', 'setup_pack', 'tidy_records', 'snapshot',
   'backup', 'backup_part', 'backup_done', 'backup_list', 'backup_get', 'backup_get_part', 'problem_log', 'problem_log_get',
-  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen'];
+  'hist_folders', 'hist_start', 'hist_pause', 'hist_resume', 'hist_status', 'hist_months', 'hist_month', 'hist_fix', 'hist_sales', 'hist_close', 'hist_reopen', 'hist_read'];
 // The Cloudflare cloud checks the device and its login here before asking Google for a Google-only request.
 function authOnly_(body) {
   REQ_ = {};
