@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 35;                // 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 36;                // 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -2892,11 +2892,13 @@ function webCode_(body) {
   if (!props_().getProperty('PV_' + u.uid)) return { ok: false, error: 'Your PIN has not reached the cloud yet – log in once on a phone or tablet, then try again.' };
   const ticket = Utilities.getUuid().replace(/-/g, '');
   CacheService.getScriptCache().put('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
-  return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || '') };
+  return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || ''), role: String(u.role || '') };
 }
 function webJoin_(body) {
   const d = body.device || {};
-  if (!d.id || !/^web-[A-Za-z0-9._:-]{6,80}$/.test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
+  // script 36: phones and tablets log in the same way (email code + PIN) – no QR codes or invites needed
+  const isWeb = /^web-/.test(String(d.id || ''));
+  if (!d.id || !(isWeb ? /^web-[A-Za-z0-9._:-]{6,80}$/ : /^[A-Za-z0-9._:-]{3,80}$/).test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
   const cache = CacheService.getScriptCache();
   const tk = 'web_t_' + String(body.ticket || '').replace(/[^a-f0-9]/gi, '').slice(0, 40);
   let t = null;
@@ -2919,13 +2921,17 @@ function webJoin_(body) {
   REQ_.locked = (REQ_.locked || 0) + 1;
   try {
     const existing = findDevice_(function (r) { return String(r[0]) === String(d.id); });
-    const name = 'Website – ' + String(u.name || u.email || 'browser').slice(0, 40) + (d.name ? ' (' + String(d.name).slice(0, 40) + ')' : '');
-    if (existing) { existing.sh.getRange(existing.row, 2, 1, 4).setValues([[name, 'web', 'active', sha_(token)]]); devicesChanged_(); }
-    else touchDevice_({ device: { name: name, kind: 'web' }, app: body.app }, String(d.id), { status: 'active', tokenHash: sha_(token), invitedBy: 'email:' + u.uid, note: 'website login' });
+    const kind = isWeb ? 'web' : (String(d.kind) === 'phone' ? 'phone' : 'tablet');
+    const name = isWeb ? 'Website – ' + String(u.name || u.email || 'browser').slice(0, 40) + (d.name ? ' (' + String(d.name).slice(0, 40) + ')' : '') : String(d.name || (String(u.name || '') + ' ' + kind)).slice(0, 60);
+    if (existing) { existing.sh.getRange(existing.row, 2, 1, 4).setValues([[name, kind, 'active', sha_(token)]]); devicesChanged_(); }
+    else touchDevice_({ device: { name: name, kind: kind }, app: body.app }, String(d.id), { status: 'active', tokenHash: sha_(token), invitedBy: 'email:' + u.uid, note: isWeb ? 'website login' : 'email + PIN login' });
     const all = ctlAll_(); const c = ctl_(all, String(d.id));
-    delete c.removedAt; delete c.until; delete c.endDate;
+    delete c.removedAt; delete c.until; delete c.endDate; delete c.shop;
     c.role = WEB_ROLE[String(u.role || '')] || 'staff';
-    c.web = { uid: u.uid, until: Date.now() + WEB_HOURS * 3600000 };
+    // the owner / an admin setting up a shared device: a shop tablet or the bakery tablet (staff use their PINs on it)
+    const shared = String(body.shared || '');
+    if (!isWeb && c.role === 'owner' && /^(S\d{1,2}|bakery)$/.test(shared)) { c.role = shared === 'bakery' ? 'bakery' : 'staff'; if (shared !== 'bakery') c.shop = shared; }
+    if (isWeb) c.web = { uid: u.uid, until: Date.now() + WEB_HOURS * 3600000 }; else delete c.web;
     if (c.role === 'owner') c.admin = true; else delete c.admin;
     hist_(c, 'Website login (' + String(u.name || '') + ', ' + c.role + ')', 'email');
     ctlSave_(all);
@@ -2933,9 +2939,9 @@ function webJoin_(body) {
     lock.releaseLock();
     REQ_.locked -= 1;
   }
-  secEvent_('device', { device: String(d.id), what: 'A browser logged in to the Easy Buys website as ' + String(u.name || u.email || u.uid) + (body.where ? ' (' + String(body.where).slice(0, 80) + ')' : '') + '. If this was not you or your staff, remove it in Admin › Devices and change that person\'s website password.' });
+  secEvent_('device', { device: String(d.id), what: (isWeb ? 'A browser logged in to the Easy Buys website' : 'A ' + (String(d.kind) === 'phone' ? 'phone' : 'tablet') + ' joined Easy Buys') + ' as ' + String(u.name || u.email || u.uid) + (body.shared ? ' (set up as ' + String(body.shared) + ')' : '') + (body.where ? ' (' + String(body.where).slice(0, 80) + ')' : '') + '. If this was not you or your staff, remove it in Admin › Devices and change that person\'s PIN.' });
   log_('Website login', [u.uid, String(d.id)]);
-  return { ok: true, token: token, approved: true, role: String(u.role || ''), until: new Date(Date.now() + WEB_HOURS * 3600000).toISOString(), uid: u.uid };
+  return { ok: true, token: token, approved: true, role: String(u.role || ''), until: isWeb ? new Date(Date.now() + WEB_HOURS * 3600000).toISOString() : '', uid: u.uid };
 }
 // The email + password + emailed code check, shared by the dashboard's email login and the website (script 35).
 function emailCheck_(body, what) {
