@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 43;                // 14 Nov: the website can leave out history sections at download (pull { skip: [tables] }) – it opens in seconds, not minutes. 13 Nov: the live connection – a one-minute ticket (live_ticket) for the WebSocket the Cloudflare cloud uses to tell every open device "something changed" the moment a change is accepted. 12 Nov (e): a device's download finds a record by its key when it is no longer at the row its change points to (after the move to Cloudflare the website never got records not changed since – vehicles, cheque books). 12 Nov (d): the invoices from before the app are read with their item lines (H_lines) and the app takes them a page at a time (hist_lines) to pair each supplier's products and costs. 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 44;                // 14 Nov (b): the real website – a page asks the cloud for just the records it shows (web_find { t, where, order, limit, offset }), only what this login's role may see. 14 Nov: the website can leave out history sections at download (pull { skip: [tables] }) – it opens in seconds, not minutes. 13 Nov: the live connection – a one-minute ticket (live_ticket) for the WebSocket the Cloudflare cloud uses to tell every open device "something changed" the moment a change is accepted. 12 Nov (e): a device's download finds a record by its key when it is no longer at the row its change points to (after the move to Cloudflare the website never got records not changed since – vehicles, cheque books). 12 Nov (d): the invoices from before the app are read with their item lines (H_lines) and the app takes them a page at a time (hist_lines) to pair each supplier's products and costs. 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -166,6 +166,7 @@ function route_(body, who) {
     if (body.kind === 'sync_check') return json_(syncCheck_(who)); // script 41: the two-way check
     if (body.kind === 'sync_keys') return json_(syncKeys_(body, who));
     if (body.kind === 'sync_rows') return json_(syncRows_(body, who));
+    if (body.kind === 'web_find') return json_(webFind_(body, who));
     if (body.kind === 'pull') { const skip = {}; if (Array.isArray(body.skip)) body.skip.slice(0, 80).forEach(function (t) { skip[String(t)] = true; }); const out = pull_(Number(body.since) || 0, who.deviceId, false, Object.assign({}, who, { skip: skip }), Number(body.limit) || 0); devicePulled_(who.deviceId, body, out);
       // 1.0.0 build 10: new phones waiting for the owner's OK – the owner's / an admin's device asks "Allow …?" at once
       if (who.admin || isBoss_(who)) out.waitingDevices = deviceRows_().filter(function (r) { return String(r[3]) === 'waiting'; }).map(function (r) { return { id: String(r[0]), name: String(r[1] || ''), kind: String(r[2] || ''), at: text_(r[5]) }; }).slice(0, 10); out.version = SCRIPT_VERSION; out.pinSalt = pinSalt_(body.pinSalt); out.admin = !!who.admin; out.access = access_(who); out.deviceRole = roleOf_(who) || null; out.user = who.user ? who.user.role : null; return json_(out); }
@@ -1350,6 +1351,49 @@ function syncRows_(body, who) {
     out.push(rec);
   });
   return { ok: true, records: out };
+}
+
+// script 44 (owner, 14 Nov: "need a website" – no download): a website page asks for just the records it shows.
+// where: [[field, op, value]] with op = | != | > | >= | < | <= | like | in; order: [field, 'asc' | 'desc'];
+// at most 500 a page. Only the tables this login may have (syncTablesFor_) and as this device may see them (forDevice_).
+const WEB_OPS_ = { '=': 1, '!=': 1, '>': 1, '>=': 1, '<': 1, '<=': 1, like: 1, 'in': 1 };
+function webFind_(body, who) {
+  const t = String(body.t || '');
+  if (syncTablesFor_(who).indexOf(t) < 0) return { ok: false, error: 'Not for this login.' };
+  const where = (Array.isArray(body.where) ? body.where : []).slice(0, 12).filter(function (w) { return Array.isArray(w) && w.length === 3 && WEB_OPS_[w[1]]; });
+  const order = Array.isArray(body.order) ? body.order : null;
+  const limit = Math.max(1, Math.min(500, Number(body.limit) || 200));
+  const offset = Math.max(0, Number(body.offset) || 0);
+  const sh = data_().getSheetByName('T_' + t);
+  if (!sh || sh.getLastRow() < 2) return { ok: true, records: [], total: 0 };
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+  const txt = function (v) { return v === null || v === undefined ? '' : String(v); };
+  const cmp = function (a, b) { const na = Number(a); const nb = Number(b); if (a !== '' && b !== '' && !isNaN(na) && !isNaN(nb)) return na - nb; return txt(a) < txt(b) ? -1 : txt(a) > txt(b) ? 1 : 0; };
+  const ok = function (row) {
+    for (let i = 0; i < where.length; i += 1) {
+      const f = String(where[i][0]); const op = where[i][1]; const v = where[i][2]; const x = row[f];
+      if (op === 'in') { if (!Array.isArray(v) || v.map(txt).indexOf(txt(x)) < 0) return false; continue; }
+      if (op === 'like') { if (txt(x).toLowerCase().indexOf(txt(v).toLowerCase()) < 0) return false; continue; }
+      const c = cmp(x === null || x === undefined ? '' : x, v === null || v === undefined ? '' : v);
+      if (op === '=' && c !== 0) return false; if (op === '!=' && c === 0) return false;
+      if (op === '>' && !(c > 0)) return false; if (op === '>=' && !(c >= 0)) return false;
+      if (op === '<' && !(c < 0)) return false; if (op === '<=' && !(c <= 0)) return false;
+    }
+    return true;
+  };
+  const found = [];
+  vals.forEach(function (r) {
+    if (!r[0]) return;
+    let row = {};
+    try { row = JSON.parse(r[4]); } catch (e) { return; }
+    if (!row) return;
+    delete row._vby;
+    row = forDevice_(t, row, String(r[0]), who);
+    if (!row || !ok(row)) return;
+    found.push({ k: String(r[0]), u: String(r[1]), d: String(r[2]), row: row });
+  });
+  if (order && order[0]) { const f = String(order[0]); const dir = order[1] === 'desc' ? -1 : 1; found.sort(function (a, b) { return dir * cmp(a.row[f] === undefined ? '' : a.row[f], b.row[f] === undefined ? '' : b.row[f]); }); }
+  return { ok: true, total: found.length, records: found.slice(offset, offset + limit).map(function (x) { return { t: t, k: x.k, u: x.u, d: x.d, row: x.row }; }) };
 }
 
 // 1.0.0 build 13: which logins' PINs this device may hold (admin device, its shop). When it changes the device asks
