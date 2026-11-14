@@ -25,7 +25,7 @@ function apiKey_() { return PropertiesService.getScriptProperties().getProperty(
 const ROOT_NAME = 'Easy Buys Bakery Cloud';   // existing folder name kept so nothing moves
 const DATA_NAME = 'Easy Buys Data (do not edit by hand)';
 const INVITE_HOURS = 48;
-const SCRIPT_VERSION = 45;                // 14 Nov (c): day_notes (an internal note per person per day on the timesheet). 14 Nov (b): the real website – a page asks the cloud for just the records it shows (web_find { t, where, order, limit, offset }), only what this login's role may see. 14 Nov: the website can leave out history sections at download (pull { skip: [tables] }) – it opens in seconds, not minutes. 13 Nov: the live connection – a one-minute ticket (live_ticket) for the WebSocket the Cloudflare cloud uses to tell every open device "something changed" the moment a change is accepted. 12 Nov (e): a device's download finds a record by its key when it is no longer at the row its change points to (after the move to Cloudflare the website never got records not changed since – vehicles, cheque books). 12 Nov (d): the invoices from before the app are read with their item lines (H_lines) and the app takes them a page at a time (hist_lines) to pair each supplier's products and costs. 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
+const SCRIPT_VERSION = 46;                // 14 Nov (d): the website logs in with email + password (web_pw_login; no emailed code each time); the first password is emailed (web_pw_send) and must be changed after the first login (web_pw_change: 10+ characters, letters and numbers, not the email / name / common words); 10 wrong passwords stop an email for 6 hours. 14 Nov (c): day_notes (an internal note per person per day on the timesheet). 14 Nov (b): the real website – a page asks the cloud for just the records it shows (web_find { t, where, order, limit, offset }), only what this login's role may see. 14 Nov: the website can leave out history sections at download (pull { skip: [tables] }) – it opens in seconds, not minutes. 13 Nov: the live connection – a one-minute ticket (live_ticket) for the WebSocket the Cloudflare cloud uses to tell every open device "something changed" the moment a change is accepted. 12 Nov (e): a device's download finds a record by its key when it is no longer at the row its change points to (after the move to Cloudflare the website never got records not changed since – vehicles, cheque books). 12 Nov (d): the invoices from before the app are read with their item lines (H_lines) and the app takes them a page at a time (hist_lines) to pair each supplier's products and costs. 12 Nov (c): the invoices from before the app are read several at the same time (6 per round, sent together) and the app's page can keep the reading going while it is open (hist_read: one round per call) – weeks become hours. 12 Nov (b): the app asks the till PCs for particular days (link_pull_request { from, to }: those days' End of days and sales sent again). 12 Nov: login codes and website tickets kept in the properties (the new cloud's quick cache is lost when it restarts: a right code was refused). 11 Nov (b): phones and tablets join with the person's email code + PIN too (no QR / invite); the owner can set one up as a shop tablet or the bakery tablet. 11 Nov: the website – a browser logs in with the person's email login (password + emailed code) and is a device of their role for 12 hours (web_join); the owner is emailed for every browser login. 10 Nov (k): cheque photos: "Not Negotiable" / NN read too, and the cheque-book stub read (hints.stub). 10 Nov (j): the AI is told what was learned from each supplier's earlier invoices (hints.notes: number pattern, usual VAT, figures read wrong before). 10 Nov (i): cheques read by the AI (invoice_ai with hints.paper = 'cheque': number, date, payee, amount in figures and in words, bank, crossed, signed). 10 Nov (h): "Send everything again" – the app can ask a shop's till PCs to send all their records again (link_pull_request { all }); the app spots a missing End of day (a gap in the Z numbers) and offers it. 10 Nov (g): link_check { have } – the till PCs check which of their End of days, sales days and recent receipts the cloud really holds, and send the missing ones again. 10 Nov (f): the invoices from before the app are found and read month by month, the newest month first, reading starts after a minute (not after every folder), and the screen says when the background timer is off. 10 Nov (e): the invoices from before the app find the shared folder (its name ends with a space) by its ID; they stay on Google after the move. 10 Nov (d): after the move, the till PCs' and office PC's requests are passed on to the new cloud. 10 Nov (c): the move to Cloudflare – with CLOUD_MOVE_TO set, devices are told the new address and Google only serves the bridge. 10 Nov (b): files supplier invoices / payments in the admin's own folders (Records › month › Inbound › supplier › Invoices). 10 Nov: goes back to the real data spreadsheet by itself (no DATA_ID fix by hand). 8 Nov: the Easy Buys cloud on Cloudflare (relay_ bridge, relay_export), device roles, and the data spreadsheet is never replaced when Google cannot open it for a moment
 // script 22:                // 7 Nov: Devices › Send its records again (resend) – a device sends what it changed in the last days once more
 // script 21:                // 7 Nov: the Aronium link's records (sales lines, End of days, till replies) are the tills' figures, not a person's change – the shop rule no longer refuses them (474 refusals from a Shop 1 device doing the link for both shops)
 // script 20:                // 1.0.0 build 14 (7 Nov): the invoices from before the app read from Drive (EBSC Invoices Records) in the background, sales typed per day / month, VAT per month, months closed and opened again (hist_*)
@@ -137,6 +137,8 @@ function doPost(e) {
     // --- 1.0.0 build 1: email logins (off unless the owner switched them on) ---
     if (body.kind === 'email_login_start') return json_(emailLoginStart_(body));
     if (body.kind === 'email_login_finish') return json_(emailLoginFinish_(body));
+    if (body.kind === 'web_pw_send') return json_(webPwSend_(body)); // script 46: website passwords
+    if (body.kind === 'web_pw_login') return json_(webPwLogin_(body));
     if (body.kind === 'web_code') return json_(webCode_(body)); // script 35: the website (email code → PIN)
     if (body.kind === 'web_join') return json_(webJoin_(body)); // script 35: the website
     const who = auth_(body);
@@ -186,6 +188,7 @@ function route_(body, who) {
     if (body.kind === 'tidy_records') return json_(needOwner_(who, body, 'Tidy Drive photos') || tidyRecords_(body.maxMs));
     if (body.kind === 'setup_pack') return json_(needOwner_(who, body, 'The supplier set-up pack') || setupPack_());
     if (body.kind === 'email_password_set') return json_(emailPasswordSet_(body, who));
+    if (body.kind === 'web_pw_change') return json_(webPwChange_(body, who)); // script 46
     if (body.kind === 'security_email') {
       // where security alerts go: only the owner, logged in, with the PIN typed again
       if (!who.user || who.user.role !== 'owner' || !proofOk_(who.user.uid, body.ownerProof)) return json_({ ok: false, error: 'The owner must be logged in and type their PIN again.' });
@@ -3026,6 +3029,145 @@ function webCode_(body) {
   const ticket = Utilities.getUuid().replace(/-/g, '');
   tcPut_('web_t_' + ticket, JSON.stringify({ uid: u.uid, email: String(body.email || '').trim().toLowerCase(), tries: 0 }), 300);
   return { ok: true, ticket: ticket, uid: u.uid, salt: pinSalt_(), name: String(u.name || ''), role: String(u.role || '') };
+}
+// script 46 (owner, 14 Nov: "all log in will be via the email and password. When registered, the initial password is
+// sent to the email on the staff profile, if given access to the website. After the first login the website asks for a
+// change of password, where the password strength matters"): no emailed code at each login.
+//  web_pw_send  { email }            – a new temporary password emailed to that address (only if it is a person's login
+//                                      email); the same answer either way. Used by the owner ("Send the password") and by
+//                                      "Forgot / first time" on the login page. The old password stops working.
+//  web_pw_login { email, password, device } – the device pass (a website for 12 hours) + a person session; mustChange when
+//                                      the password is a temporary one. 10 wrong passwords for an email stop it for 6 hours.
+//  web_pw_change { password, newPassword } (the logged-in website) – a strong password of the person's own.
+const WEB_PW_MAX = 10;
+const PW_WORDS = ['password', 'easybuys', 'qwerty', '123456', 'letmein', 'welcome', 'admin', 'fiji', 'lautoka', 'drasa', 'tukani'];
+function webPwFails_(e) { return Number(tcGet_('wpf_' + sha_(String(e || '')).slice(0, 20)) || '0'); }
+function webPwFail_(e) { tcPut_('wpf_' + sha_(String(e || '')).slice(0, 20), String(webPwFails_(e) + 1), 6 * 3600); }
+function pwStore_(uid, pw, temp) {
+  const salt = sha_(Utilities.getUuid()).slice(0, 16);
+  const iter = PIN_ITER * 5;
+  props_().setProperty('PW_' + uid, iter + ':' + salt + ':' + pbkdf2_(secret_('PIN_PEPPER') + ':' + pw, salt, iter));
+  if (temp) props_().setProperty('PWT_' + uid, String(Date.now())); else props_().deleteProperty('PWT_' + uid);
+}
+function pwOk_(uid, pw) {
+  const v = props_().getProperty('PW_' + uid);
+  if (!v || !pw) return false;
+  const parts = v.split(':');
+  return parts.length === 3 && pbkdf2_(secret_('PIN_PEPPER') + ':' + String(pw), parts[1], Number(parts[0]) || PIN_ITER) === parts[2];
+}
+// The password rules (the website shows the same ones): 10+ characters, a letter and a number, not the email or the name,
+// not a common word, not the temporary one.
+function pwWeak_(pw, u, e) {
+  const p = String(pw || '');
+  if (p.length < 10) return 'The password must be at least 10 characters.';
+  if (!/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) return 'Use letters and numbers in the password.';
+  const low = p.toLowerCase();
+  const local = String(e || '').split('@')[0].toLowerCase();
+  if (local.length >= 4 && low.indexOf(local) >= 0) return 'The password must not contain your email.';
+  const first = String((u && u.name) || '').split(/\s+/)[0].toLowerCase();
+  if (first.length >= 3 && low.indexOf(first) >= 0) return 'The password must not contain your name.';
+  for (let i = 0; i < PW_WORDS.length; i++) if (low.indexOf(PW_WORDS[i]) >= 0) return 'The password is too easy to guess (' + PW_WORDS[i] + ').';
+  if (/^(.)\1+$/.test(p) || /(0123|1234|2345|3456|4567|5678|6789|abcd)/i.test(p)) return 'The password is too easy to guess.';
+  return null;
+}
+function tempPw_() {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const h = sha_(Utilities.getUuid() + Utilities.getUuid());
+  let out = '';
+  for (let i = 0; i < 12; i++) out += A.charAt(parseInt(h.substr(i * 2, 2), 16) % A.length);
+  return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12);
+}
+const PW_SENT = 'If this email may log in to the Easy Buys website, a password has been sent to it.';
+function webPwSend_(body) {
+  const cache = CacheService.getScriptCache();
+  const e = String(body.email || '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return { ok: false, error: 'Type your email address.' };
+  if (limited_(cache, 'wps_c_' + caller_(body), 10, 3600) || limited_(cache, 'wps_e_' + sha_(e).slice(0, 20), 3, 3600)) return { ok: true, message: PW_SENT };
+  if (!emailOn_()) return { ok: true, message: PW_SENT };
+  const u = userByEmail_(e);
+  if (!u || String(u.active) === '0') return { ok: true, message: PW_SENT };
+  const pw = tempPw_();
+  pwStore_(u.uid, pw, true);
+  mailEssential_({ to: e, subject: 'Your Easy Buys website password', name: 'Easy Buys',
+    body: 'Dear ' + String(u.name || 'team member') + ',\n\nHere are your login details for the Easy Buys website:\n\n  Website: https://easybuys-web.easybuys.workers.dev\n  Email: ' + e + '\n  Temporary password: ' + pw + '\n\nThis is a temporary password. When you log in for the first time, the website will ask you to choose your own password.\n\nThese login details and the Easy Buys website are for company use only. They are confidential and must not be shared with, or used by, anyone else unless specifically authorised by Management. Do not forward this email. If you did not expect this email, please tell Management straight away.\n\nWe value your contribution.\n\nKind regards\nEBSC Management Team' });
+  log_('Website password sent', [u.uid]);
+  return { ok: true, message: PW_SENT };
+}
+// The device pass for a person who has proved who they are (the website: 12 hours).
+function issueWebDevice_(u, d, body) {
+  const isWeb = /^web-/.test(String(d.id || ''));
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return busyReply_();
+  REQ_.locked = (REQ_.locked || 0) + 1;
+  try {
+    const existing = findDevice_(function (r) { return String(r[0]) === String(d.id); });
+    const kind = isWeb ? 'web' : (String(d.kind) === 'phone' ? 'phone' : 'tablet');
+    const name = isWeb ? 'Website – ' + String(u.name || u.email || 'browser').slice(0, 40) + (d.name ? ' (' + String(d.name).slice(0, 40) + ')' : '') : String(d.name || (String(u.name || '') + ' ' + kind)).slice(0, 60);
+    if (existing) { existing.sh.getRange(existing.row, 2, 1, 4).setValues([[name, kind, 'active', sha_(token)]]); devicesChanged_(); }
+    else touchDevice_({ device: { name: name, kind: kind }, app: body.app }, String(d.id), { status: 'active', tokenHash: sha_(token), invitedBy: 'email:' + u.uid, note: isWeb ? 'website login' : 'email + password login' });
+    const all = ctlAll_(); const c = ctl_(all, String(d.id));
+    delete c.removedAt; delete c.until; delete c.endDate; delete c.shop;
+    c.role = WEB_ROLE[String(u.role || '')] || 'staff';
+    const shared = String(body.shared || '');
+    if (!isWeb && c.role === 'owner' && /^(S\d{1,2}|bakery)$/.test(shared)) { c.role = shared === 'bakery' ? 'bakery' : 'staff'; if (shared !== 'bakery') c.shop = shared; }
+    if (isWeb) c.web = { uid: u.uid, until: Date.now() + WEB_HOURS * 3600000 }; else delete c.web;
+    if (c.role === 'owner') c.admin = true; else delete c.admin;
+    hist_(c, 'Website login (' + String(u.name || '') + ', ' + c.role + ')', 'email');
+    ctlSave_(all);
+  } finally {
+    lock.releaseLock();
+    REQ_.locked -= 1;
+  }
+  secEvent_('device', { device: String(d.id), what: (isWeb ? 'A browser logged in to the Easy Buys website' : 'A ' + (String(d.kind) === 'phone' ? 'phone' : 'tablet') + ' joined Easy Buys') + ' as ' + String(u.name || u.email || u.uid) + (body.shared ? ' (set up as ' + String(body.shared) + ')' : '') + (body.where ? ' (' + String(body.where).slice(0, 80) + ')' : '') + '. If this was not you or your staff, remove it in Admin › Devices and change that person\'s password.' });
+  log_('Website login', [u.uid, String(d.id)]);
+  return { ok: true, token: token, approved: true, role: String(u.role || ''), until: isWeb ? new Date(Date.now() + WEB_HOURS * 3600000).toISOString() : '', uid: u.uid };
+}
+function webPwLogin_(body) {
+  const d = body.device || {};
+  const isWeb = /^web-/.test(String(d.id || ''));
+  if (!d.id || !(isWeb ? /^web-[A-Za-z0-9._:-]{6,80}$/ : /^[A-Za-z0-9._:-]{3,80}$/).test(String(d.id))) return { ok: false, error: 'This browser could not be identified – reload the page.' };
+  const cache = CacheService.getScriptCache();
+  const e = String(body.email || '').trim().toLowerCase();
+  const BAD = 'Wrong email or password.';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) || !body.password) return { ok: false, error: BAD };
+  if (limited_(cache, 'wpl_c_' + caller_(body), 30, 3600)) return { ok: false, error: 'Too many tries from here – wait an hour.' };
+  if (!emailOn_()) return { ok: false, error: 'The website is switched off (the owner switches it on in Admin › Website logins).' };
+  if (webPwFails_(e) >= WEB_PW_MAX) { failCount_('email', e, { person: e, what: '10 wrong passwords on the website login' }); return { ok: false, error: 'Too many wrong passwords for this email – wait 6 hours, or use "Forgot password" to get a new one.' }; }
+  const u = userByEmail_(e);
+  if (!u || String(u.active) === '0' || !pwOk_(u.uid, body.password)) {
+    webPwFail_(e);
+    failCount_('email', e, { person: e, what: '5 wrong website passwords' });
+    return { ok: false, error: BAD };
+  }
+  const temp = props_().getProperty('PWT_' + u.uid);
+  if (temp && Date.now() - Number(temp) > 7 * 24 * 3600000) return { ok: false, error: 'This temporary password is more than 7 days old – use "Forgot password" to get a new one.' };
+  tcPut_('wpf_' + sha_(e).slice(0, 20), 'null', 1);
+  const r = issueWebDevice_(u, d, body);
+  if (!r.ok) return r;
+  // a person session on this device too (owner / manager work needs the person, not only the device)
+  const session = Utilities.getUuid() + Utilities.getUuid();
+  const all = sessionsAll_();
+  const until = Date.now() + WEB_HOURS * 3600000;
+  all[sha_(session)] = { uid: u.uid, device: String(d.id), exp: until };
+  sessionsSave_(all);
+  r.session = session; r.sessionUntil = new Date(until).toISOString();
+  r.name = String(u.name || ''); r.mustChange = !!temp;
+  r.salt = pinSalt_();
+  return r;
+}
+function webPwChange_(body, who) {
+  const u = who && who.user;
+  if (!u) return { ok: false, error: 'Log in again first.' };
+  const full = cloudUser_(u.uid) || {};
+  if (!pwOk_(u.uid, body.password)) return { ok: false, error: 'The current password is not right.' };
+  if (String(body.newPassword || '') === String(body.password || '')) return { ok: false, error: 'Choose a new password, not the same one.' };
+  const weak = pwWeak_(body.newPassword, full, full.email);
+  if (weak) return { ok: false, error: weak };
+  pwStore_(u.uid, String(body.newPassword), false);
+  log_('Website password changed', [u.uid, who.deviceId]);
+  secEvent_('device', { device: who.deviceId, person: u.name, what: String(u.name || '') + ' changed their website password.' });
+  return { ok: true };
 }
 function webJoin_(body) {
   const d = body.device || {};
