@@ -3089,7 +3089,7 @@ function webPwSend_(body) {
   const pw = tempPw_();
   pwStore_(u.uid, pw, true);
   mailEssential_({ to: e, subject: 'Your Easy Buys website password', name: 'Easy Buys',
-    body: 'Hello ' + String(u.name || '') + ',\n\nYour Easy Buys website login:\n\n  Website: https://easybuys-web.easybuys.workers.dev\n  Email: ' + e + '\n  Password: ' + pw + '\n\nThis is a temporary password. After you log in, the website asks you to choose your own.\n\nIf you did not expect this email, tell the owner.' });
+    body: 'Dear ' + String(u.name || 'team member') + ',\n\nHere are your login details for the Easy Buys website:\n\n  Website: https://easybuys-web.easybuys.workers.dev\n  Email: ' + e + '\n  Temporary password: ' + pw + '\n\nThis is a temporary password. When you log in for the first time, the website will ask you to choose your own password.\n\nThese login details and the Easy Buys website are for company use only. They are confidential and must not be shared with, or used by, anyone else unless specifically authorised by Management. Do not forward this email. If you did not expect this email, please tell Management straight away.\n\nWe value your contribution.\n\nKind regards\nEBSC Management Team' });
   log_('Website password sent', [u.uid]);
   return { ok: true, message: PW_SENT };
 }
