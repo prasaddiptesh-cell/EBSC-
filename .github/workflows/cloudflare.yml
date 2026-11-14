@@ -34,6 +34,11 @@ jobs:
           q="{\"query\":\"{ viewer { accounts(filter:{accountTag:\\\"$CLOUDFLARE_ACCOUNT_ID\\\"}) { durableObjectsPeriodicGroups(limit:200, filter:{datetimeHour_geq:\\\"$since\\\", datetimeHour_leq:\\\"$until\\\"}, orderBy:[datetimeHour_ASC]) { dimensions { datetimeHour namespaceId } sum { rowsWritten rowsRead storageWriteUnits activeTime } } } } }\"}"
           curl -s -X POST -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$q" https://api.cloudflare.com/client/v4/graphql \
             | jq -c '.errors // (.data.viewer.accounts[0].durableObjectsPeriodicGroups[] | {h: .dimensions.datetimeHour, ns: (.dimensions.namespaceId[0:6]), w: .sum.rowsWritten, r: .sum.rowsRead, at: .sum.activeTime, wu: .sum.storageWriteUnits})'
+      - name: The account's Workers plan (plan names only)
+        continue-on-error: true
+        run: |
+          curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/subscriptions" | jq -c '{success, errors: [.errors[]?.message], plans: [.result[]? | {name: .rate_plan.public_name, id: .rate_plan.id, state}]}'
+          curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/account-settings" | jq -c '{success, errors: [.errors[]?.message], usage_model: .result.default_usage_model}'
       - name: The app source (EasyBuys.zip)
         run: |
           mkdir -p app && cd app && unzip -q ../EasyBuys.zip
