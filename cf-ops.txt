@@ -1,3 +1,2 @@
-deploy
 proc
-status
+link
