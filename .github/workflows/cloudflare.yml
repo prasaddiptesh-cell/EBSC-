@@ -120,6 +120,7 @@ jobs:
               send) echo "== send"; ask cf_send | jq -c . ;;
               tenants) echo "== businesses"; curl -s -m 60 -X POST -H 'Content-Type: text/plain;charset=utf-8' --data "{\"kind\":\"tenant_list\",\"providerKey\":\"$PROVIDER_KEY\"}" "$URL/provider" | jq -c . ;;
               hist) echo "== invoices from before the app (Google)"; ask cf_hist | jq -c '{ok, error, status: .status, months: ((.months.months // .months.list // .months) | if type=="array" then map(del(.invoices?, .rows?, .items?)) else . end)}' | cut -c1-6000 ;;
+              link) echo "== link (keys, dates and part counts only)"; sleep 70; ask cf_link | head -1 | jq -c '{ok, error, now, items, eods: (.eods // {} | with_entries(.value |= {n, lastDate, states, days})), sources: (.sources // {} | with_entries(.value |= {kinds, lists, zs, salesDays, receiptDays}))}' ;;
               status) echo "== status"; sleep 70; ask cf_status | tee /tmp/st.txt | head -1 | jq -c '{ok, error, version, refused, waitingForGoogle, imported, open, stats, sheets: [.sheets[]? | "\(.name) \(.rows)"]}'; tail -1 /tmp/st.txt ;;
             esac
           done
